@@ -10,6 +10,7 @@
 #include "tf2/transform_datatypes.h"
 #include "tf2_sensor_msgs/tf2_sensor_msgs.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
+#include "visualization_msgs/MarkerArray.hpp"
 
 #include "rclcpp_lifecycle/lifecycle_node.hpp"
 #include "rclcpp_lifecycle/lifecycle_publisher.hpp"
@@ -20,6 +21,7 @@ class DeskDetector : public rclcpp_lifecycle::LifecycleNode
     private:
         
         std::string pointcloud_topic_name_;
+        std::
         double minimum_desk_height_ = 0.3;
         double maximum_desk_height_ = 1.5;
 
@@ -29,6 +31,9 @@ class DeskDetector : public rclcpp_lifecycle::LifecycleNode
         std::shared_ptr<tf2_ros::StaticTransformBroadcaster> m_static_tf_broadcaster_;
 
         void compensated_cloudCB(const sensor_msgs::msg::PointCloud2::ConstPtr& pc_in);
+
+        rclcpp_lifecycle::LifecyclePublisher<visualization_msgs::msg::MarkerArray>::SharedPtr m_markers_to_edge_pub_;
+        rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr m_pc_sub_;
     
     public:
 
