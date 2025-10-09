@@ -32,8 +32,60 @@ void DeskDetector::compensated_cloudCB(const sensor_msgs::msg::PointCloud2::Cons
 {
 
     pcl::PointCloud<pcl::PointXYZ>::Ptr in_cloud (new pcl::PointCloud<pcl::PointXYZ>);
-    pcl::fromROSMsg(pc_in, *in_cloud);
+    pcl::fromROSMsg(*pc_in, *in_cloud);
+
+    pcl::SACSegmentation<pcl::PointXYZ> seg;
+    seg.setOptimizeCoefficients(true);
+    seg.setModelType(pcl::SACMODEL_PLANE);
+    seg.setMethodType(pcl::SAC_RANSAC);
+    seg.setMaxIterations(100);
+    seg.setDistanceThreshold(0.05);
+
+    pcl::ExtractIndices<pcl::PointXYZ> extract;
+
+    pcl::PointCloud<pcl::PointXYZ>::Ptr remaining(new pcl::PointCloud<pcl::PointXYZ>);
+    *remaining = *in_cloud;
     
+    while(remaining->size()>100)
+    {
+        pcl::ModelCoefficients::Ptr coefficients(new pcl::ModelCoefficients);
+        pcl::PointIndices::Ptr inliers(new pcl::PointIndices);
+
+        seg.setInputCloud(remaining);
+        seg.segment(*inliers, *coefficients);
+
+        if (inliers->indices.size() < 100) break;
+
+        // Normal vector (coefficients[0..2]), plane eq: ax+by+cz+d=0
+        Eigen::Vector3f normal(coefficients->values[0], coefficients->values[1], coefficients->values[2]);
+        normal.normalize();
+
+        if (fabs(normal.dot(Eigen::Vector3f::UnitZ())) > 0.9) {
+            // remove ground points but don’t publish them
+            extract.setInputCloud(remaining);
+            extract.setIndices(inliers);
+            extract.setNegative(true);
+            pcl::PointCloud<pcl::PointXYZ>::Ptr tmp(new pcl::PointCloud<pcl::PointXYZ>);
+            extract.filter(*tmp);
+            remaining.swap(tmp);
+            continue;
+        }
+
+
+        // Extract non-ground plane
+        pcl::PointCloud<pcl::PointXYZ>::Ptr plane(new pcl::PointCloud<pcl::PointXYZ>);
+        extract.setInputCloud(remaining);
+        extract.setIndices(inliers);
+        extract.setNegative(false);
+        extract.filter(*plane);
+    }
+
+
+
+
+
+
+
 
 }
 
