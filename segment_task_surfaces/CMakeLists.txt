@@ -20,6 +20,8 @@ find_package(nav_2d_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(visualization_msgs REQUIRED)
+
 find_package(laser_geometry REQUIRED)
 find_package(pcl_conversions REQUIRED)
 FIND_PACKAGE(YARP COMPONENTS os sig dev REQUIRED)
@@ -60,7 +62,7 @@ include_directories(/opt/ros/iron/include/tf2_ros)
 include_directories(/opt/ros/iron/include/laser_geometry)
 include_directories(/opt/ros/iron/include/pcl_conversions)
 include_directories(include)
-add_subdirectory(interfaces)
+#add_subdirectory(interfaces)
 # uncomment the following section in order to fill in
 # further dependencies manually.
 # find_package(<dependency> REQUIRED)
@@ -76,5 +78,42 @@ if(BUILD_TESTING)
   set(ament_cmake_cpplint_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
 endif()
+
+
+
+add_executable(desk_detector src/segment_closest_desk.cpp)
+ament_target_dependencies(desk_detector
+  "rclcpp"
+  "rclcpp_lifecycle"
+  "tf2_ros"
+  "tf2_msgs"
+  "tf2"
+  "tf2_sensor_msgs"
+  "sensor_msgs"
+  "visualization_msgs"
+  "geometry_msgs"
+  "pcl_ros"
+  "tf2_eigen"
+)
+target_link_libraries(desk_detector ${PCL_LIBRARIES})
+
+install(DIRECTORY
+  launch
+  DESTINATION share/${PROJECT_NAME}/
+)
+
+install(DIRECTORY
+  param
+  DESTINATION share/${PROJECT_NAME}/
+)
+
+install(DIRECTORY include/
+  DESTINATION include/
+)
+
+install(TARGETS
+  desk_detector
+  DESTINATION lib/${PROJECT_NAME})
+
 
 ament_package()
