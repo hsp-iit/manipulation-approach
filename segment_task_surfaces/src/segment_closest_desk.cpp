@@ -1,5 +1,6 @@
 #include "segment_task_surfaces/segment_closest_desk.hpp"
 #include <pcl_conversions/pcl_conversions.h>
+#include <pcl/common/impl/angles.hpp>
 #include <iostream>
 #include <pcl/ModelCoefficients.h>
 #include <pcl/io/pcd_io.h>
@@ -34,6 +35,8 @@ void DeskDetector::compensated_cloudCB(const sensor_msgs::msg::PointCloud2::Cons
 {
 
     pcl::PointCloud<pcl::PointXYZ>::Ptr in_cloud (new pcl::PointCloud<pcl::PointXYZ>);
+    pcl::PointCloud<pcl::PointXYZ>::Ptr in_cloud_pre_filter (new pcl::PointCloud<pcl::PointXYZ>);
+
 
     sensor_msgs::msg::PointCloud2 realsense_cloud;
     std::string transform_error;
@@ -56,34 +59,49 @@ void DeskDetector::compensated_cloudCB(const sensor_msgs::msg::PointCloud2::Cons
         }
     }
     
-    RCLCPP_INFO(this->get_logger(), "GOTT HERE==================================\n");
-    pcl::fromROSMsg(realsense_cloud, *in_cloud);
+    RCLCPP_INFO(this->get_logger(), "GOTT HERE %s ==================================\n",realsense_cloud.header.frame_id.c_str());
+    pcl::fromROSMsg(realsense_cloud, *in_cloud_pre_filter);
+
+    pcl::PassThrough<pcl::PointXYZ> pass;
+    pass.setInputCloud(in_cloud_pre_filter);
+    pass.setFilterFieldName("z");
+    pass.setFilterLimits(min_desk_height_, max_desk_height_);
+    pass.filter(*in_cloud);
 
     pcl::SACSegmentation<pcl::PointXYZ> seg;
     seg.setOptimizeCoefficients(true);
-    seg.setModelType(pcl::SACMODEL_PLANE);
+    seg.setModelType(pcl::SACMODEL_PERPENDICULAR_PLANE);
     seg.setMethodType(pcl::SAC_RANSAC);
-    seg.setMaxIterations(100);
+    seg.setMaxIterations(1000);
     seg.setDistanceThreshold(0.05);
-
+    seg.setAxis(Eigen::Vector3f(0.0, 0.0, 1.0));
+    // Accept surfaces within X degrees of horizontal
+    seg.setEpsAngle(pcl::deg2rad(10.0f)); // 10° tolerance
     pcl::ExtractIndices<pcl::PointXYZ> extract;
 
     pcl::PointCloud<pcl::PointXYZ>::Ptr remaining(new pcl::PointCloud<pcl::PointXYZ>);
     *remaining = *in_cloud;
     int plane_id = 0;
+    int iter = 0;
 
     visualization_msgs::msg::MarkerArray marker_array;
 
-
-    while(remaining->size()>100)
+    int max_iter = 1000;
+    while(remaining->size() > 1000 && iter < max_iter)
     {
+        RCLCPP_INFO(this->get_logger(), "GOTT HERE2222222==================================\n");
+
         pcl::ModelCoefficients::Ptr coefficients(new pcl::ModelCoefficients);
         pcl::PointIndices::Ptr inliers(new pcl::PointIndices);
 
         seg.setInputCloud(remaining);
         seg.segment(*inliers, *coefficients);
 
-        if (inliers->indices.size() < 100) break;
+        
+        if (inliers->indices.empty()) {
+            RCLCPP_INFO(this->get_logger(), "No more planes found.");
+            break;
+        }
 
         // Normal vector (coefficients[0..2]), plane eq: ax+by+cz+d=0
         Eigen::Vector3f normal(coefficients->values[0], coefficients->values[1], coefficients->values[2]);
@@ -91,12 +109,22 @@ void DeskDetector::compensated_cloudCB(const sensor_msgs::msg::PointCloud2::Cons
 
         if (fabs(normal.dot(Eigen::Vector3f::UnitZ())) > 0.9) 
         {
+
+            RCLCPP_INFO(this->get_logger(), "Got something close to horizontal.");
+    
             // remove ground points but don’t publish them
             extract.setInputCloud(remaining);
             extract.setIndices(inliers);
             extract.setNegative(true);
             pcl::PointCloud<pcl::PointXYZ>::Ptr plane(new pcl::PointCloud<pcl::PointXYZ>);
             extract.filter(*plane);
+                // 3️⃣ If we extracted almost the same cloud (rare edge case)
+            if (plane->size() == remaining->size())
+            {
+                RCLCPP_WARN(this->get_logger(), "Plane extraction did not reduce point cloud — breaking.");
+                break;
+            }
+
             remaining.swap(plane);
 
             Eigen::Vector4f centroid;
@@ -111,7 +139,7 @@ void DeskDetector::compensated_cloudCB(const sensor_msgs::msg::PointCloud2::Cons
 
             // ---- Create centroid marker ----
             visualization_msgs::msg::Marker centroid_marker;
-            centroid_marker.header = pc_in->header;
+            centroid_marker.header = realsense_cloud.header;
             centroid_marker.ns = "plane_centroids";
             centroid_marker.id = plane_id;
             centroid_marker.type = visualization_msgs::msg::Marker::SPHERE;
@@ -130,7 +158,7 @@ void DeskDetector::compensated_cloudCB(const sensor_msgs::msg::PointCloud2::Cons
 
             // ---- Create hull line marker ----
             visualization_msgs::msg::Marker hull_marker;
-            hull_marker.header = pc_in->header;
+            hull_marker.header = realsense_cloud.header;
             hull_marker.ns = "plane_hulls";
             hull_marker.id = plane_id;
             hull_marker.type = visualization_msgs::msg::Marker::LINE_STRIP;
@@ -153,12 +181,8 @@ void DeskDetector::compensated_cloudCB(const sensor_msgs::msg::PointCloud2::Cons
                 hull_marker.points.push_back(hull_marker.points.front());
 
             marker_array.markers.push_back(hull_marker);
-
-            // ---- Remove this plane ----
-            extract.setNegative(true);
-            pcl::PointCloud<pcl::PointXYZ>::Ptr tmp(new pcl::PointCloud<pcl::PointXYZ>);
-            extract.filter(*tmp);
-            remaining.swap(tmp);
+            iter++;
+            plane_id++;
             continue;
     
         }
@@ -171,7 +195,7 @@ void DeskDetector::compensated_cloudCB(const sensor_msgs::msg::PointCloud2::Cons
         extract.setNegative(false);
         extract.filter(*non_horizontal_plane);
         remaining.swap(non_horizontal_plane);
-
+        iter++;
 
     }
 
