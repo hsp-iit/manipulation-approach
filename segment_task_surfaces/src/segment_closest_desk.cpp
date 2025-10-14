@@ -12,6 +12,8 @@
 #include <pcl/filters/extract_indices.h>
 #include <pcl/surface/convex_hull.h>
 #include <pcl/common/centroid.h>
+#include <pcl/segmentation/extract_clusters.h>
+#include <pcl/filters/voxel_grid.h>
 #include <tf2_eigen/tf2_eigen.hpp>
 
 //TODO: Cite Simone's Plane Detector Code
@@ -36,6 +38,8 @@ void DeskDetector::compensated_cloudCB(const sensor_msgs::msg::PointCloud2::Cons
 
     pcl::PointCloud<pcl::PointXYZ>::Ptr in_cloud (new pcl::PointCloud<pcl::PointXYZ>);
     pcl::PointCloud<pcl::PointXYZ>::Ptr in_cloud_pre_filter (new pcl::PointCloud<pcl::PointXYZ>);
+    pcl::PointCloud<pcl::PointXYZ>::Ptr in_cloud_pre_voxelized (new pcl::PointCloud<pcl::PointXYZ>);
+
 
 
     sensor_msgs::msg::PointCloud2 realsense_cloud;
@@ -59,49 +63,82 @@ void DeskDetector::compensated_cloudCB(const sensor_msgs::msg::PointCloud2::Cons
         }
     }
     
-    RCLCPP_INFO(this->get_logger(), "GOTT HERE %s ==================================\n",realsense_cloud.header.frame_id.c_str());
+    RCLCPP_INFO(this->get_logger(), "GOTT HERE %s ==================================\n",pc_in->header.frame_id.c_str());
     pcl::fromROSMsg(realsense_cloud, *in_cloud_pre_filter);
 
     pcl::PassThrough<pcl::PointXYZ> pass;
     pass.setInputCloud(in_cloud_pre_filter);
     pass.setFilterFieldName("z");
     pass.setFilterLimits(min_desk_height_, max_desk_height_);
-    pass.filter(*in_cloud);
+    pass.filter(*in_cloud_pre_voxelized);
 
-    pcl::SACSegmentation<pcl::PointXYZ> seg;
-    seg.setOptimizeCoefficients(true);
-    seg.setModelType(pcl::SACMODEL_PERPENDICULAR_PLANE);
-    seg.setMethodType(pcl::SAC_RANSAC);
-    seg.setMaxIterations(1000);
-    seg.setDistanceThreshold(0.05);
-    seg.setAxis(Eigen::Vector3f(0.0, 0.0, 1.0));
-    // Accept surfaces within X degrees of horizontal
-    seg.setEpsAngle(pcl::deg2rad(10.0f)); // 10° tolerance
-    pcl::ExtractIndices<pcl::PointXYZ> extract;
+    pass.setInputCloud(in_cloud_pre_voxelized);
+    pass.setFilterFieldName("y");
+    pass.setFilterLimits(-8.0, 8.0);
+    pass.filter(*in_cloud_pre_voxelized);
 
-    pcl::PointCloud<pcl::PointXYZ>::Ptr remaining(new pcl::PointCloud<pcl::PointXYZ>);
-    *remaining = *in_cloud;
+
+    pass.setInputCloud(in_cloud_pre_voxelized);
+    pass.setFilterFieldName("x");
+    pass.setFilterLimits(0.0,10.0);
+    pass.filter(*in_cloud_pre_voxelized);
+
+    pcl::VoxelGrid<pcl::PointXYZ> vg;
+    vg.setInputCloud(in_cloud_pre_voxelized);
+    vg.setLeafSize(0.02f, 0.02f, 0.02f); // 2 cm voxel grid
+    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_filtered(new pcl::PointCloud<pcl::PointXYZ>);
+    vg.filter(*in_cloud);
+
+    pcl::search::KdTree<pcl::PointXYZ>::Ptr tree(new pcl::search::KdTree<pcl::PointXYZ>);
+    tree->setInputCloud(in_cloud);
+
+    std::vector<pcl::PointIndices> cluster_indices;
+    pcl::EuclideanClusterExtraction<pcl::PointXYZ> ec;
+    ec.setClusterTolerance(0.05);  
+    ec.setMinClusterSize(500);
+    ec.setMaxClusterSize(25000);
+    ec.setSearchMethod(tree);
+    ec.setInputCloud(in_cloud);
+    ec.extract(cluster_indices);
+
+    int cluster_id = 0;
+    visualization_msgs::msg::MarkerArray marker_array;
     int plane_id = 0;
     int iter = 0;
 
-    visualization_msgs::msg::MarkerArray marker_array;
+    for (const auto& indices : cluster_indices) 
+    {   
+        pcl::PointCloud<pcl::PointXYZ>::Ptr cluster(new pcl::PointCloud<pcl::PointXYZ>);
+        for (int idx : indices.indices)
+            cluster->push_back((*in_cloud)[idx]);
 
-    int max_iter = 1000;
-    while(remaining->size() > 1000 && iter < max_iter)
-    {
-        RCLCPP_INFO(this->get_logger(), "GOTT HERE2222222==================================\n");
+        cluster->width = cluster->size();
+        cluster->height = 1;
+        cluster->is_dense = true;
+        RCLCPP_INFO(this->get_logger(), "Read Cluster number %d", cluster_id);
+
+        pcl::SACSegmentation<pcl::PointXYZ> seg;
+        seg.setOptimizeCoefficients(true);
+        seg.setModelType(pcl::SACMODEL_PERPENDICULAR_PLANE);
+        seg.setMethodType(pcl::SAC_RANSAC);
+        seg.setMaxIterations(1000);
+        seg.setDistanceThreshold(0.05);
+        seg.setAxis(Eigen::Vector3f(0.0, 0.0, 1.0));
+        // Accept surfaces within X degrees of horizontal
+        seg.setEpsAngle(pcl::deg2rad(20.0f)); // 10° tolerance
+        pcl::ExtractIndices<pcl::PointXYZ> extract;
 
         pcl::ModelCoefficients::Ptr coefficients(new pcl::ModelCoefficients);
         pcl::PointIndices::Ptr inliers(new pcl::PointIndices);
 
-        seg.setInputCloud(remaining);
+        seg.setInputCloud(cluster);
         seg.segment(*inliers, *coefficients);
 
+        if (inliers->indices.empty()) continue;
         
-        if (inliers->indices.empty()) {
-            RCLCPP_INFO(this->get_logger(), "No more planes found.");
-            break;
-        }
+
+        pcl::PointCloud<pcl::PointXYZ>::Ptr remaining(new pcl::PointCloud<pcl::PointXYZ>);
+
 
         // Normal vector (coefficients[0..2]), plane eq: ax+by+cz+d=0
         Eigen::Vector3f normal(coefficients->values[0], coefficients->values[1], coefficients->values[2]);
@@ -110,22 +147,15 @@ void DeskDetector::compensated_cloudCB(const sensor_msgs::msg::PointCloud2::Cons
         if (fabs(normal.dot(Eigen::Vector3f::UnitZ())) > 0.9) 
         {
 
-            RCLCPP_INFO(this->get_logger(), "Got something close to horizontal.");
+            RCLCPP_INFO(this->get_logger(), "Got something close to horizontal with size %d.",cluster->size());
     
             // remove ground points but don’t publish them
-            extract.setInputCloud(remaining);
+            extract.setInputCloud(cluster);
             extract.setIndices(inliers);
             extract.setNegative(true);
             pcl::PointCloud<pcl::PointXYZ>::Ptr plane(new pcl::PointCloud<pcl::PointXYZ>);
             extract.filter(*plane);
-                // 3️⃣ If we extracted almost the same cloud (rare edge case)
-            if (plane->size() == remaining->size())
-            {
-                RCLCPP_WARN(this->get_logger(), "Plane extraction did not reduce point cloud — breaking.");
-                break;
-            }
-
-            remaining.swap(plane);
+            
 
             Eigen::Vector4f centroid;
             pcl::compute3DCentroid(*plane, centroid);
@@ -147,9 +177,9 @@ void DeskDetector::compensated_cloudCB(const sensor_msgs::msg::PointCloud2::Cons
             centroid_marker.pose.position.x = centroid[0];
             centroid_marker.pose.position.y = centroid[1];
             centroid_marker.pose.position.z = centroid[2];
-            centroid_marker.scale.x = 0.08;
-            centroid_marker.scale.y = 0.08;
-            centroid_marker.scale.z = 0.08;
+            centroid_marker.scale.x = 0.1;
+            centroid_marker.scale.y = 0.1;
+            centroid_marker.scale.z = 0.1;
             centroid_marker.color.r = 1.0f;
             centroid_marker.color.g = 0.0f;
             centroid_marker.color.b = 0.0f;
@@ -183,28 +213,16 @@ void DeskDetector::compensated_cloudCB(const sensor_msgs::msg::PointCloud2::Cons
             marker_array.markers.push_back(hull_marker);
             iter++;
             plane_id++;
-            continue;
-    
         }
-
-
-        // Extract non-horizontal plane
-        pcl::PointCloud<pcl::PointXYZ>::Ptr non_horizontal_plane(new pcl::PointCloud<pcl::PointXYZ>);
-        extract.setInputCloud(remaining);
-        extract.setIndices(inliers);
-        extract.setNegative(false);
-        extract.filter(*non_horizontal_plane);
-        remaining.swap(non_horizontal_plane);
-        iter++;
+        cluster_id++;
 
     }
 
-        // Clear old markers
-        visualization_msgs::msg::Marker clear_marker;
-        clear_marker.action = visualization_msgs::msg::Marker::DELETEALL;
-        marker_array.markers.insert(marker_array.markers.begin(), clear_marker);
-
-        horizontal_surfaces_pub_->publish(marker_array);
+    // Clear old markers
+    visualization_msgs::msg::Marker clear_marker;
+    clear_marker.action = visualization_msgs::msg::Marker::DELETEALL;
+    marker_array.markers.insert(marker_array.markers.begin(), clear_marker);
+    horizontal_surfaces_pub_->publish(marker_array);
 
 
 
