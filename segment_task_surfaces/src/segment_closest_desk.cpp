@@ -14,7 +14,9 @@
 #include <pcl/common/centroid.h>
 #include <pcl/segmentation/extract_clusters.h>
 #include <pcl/filters/voxel_grid.h>
+#include <pcl/features/normal_3d.h>
 #include <tf2_eigen/tf2_eigen.hpp>
+#include <pcl/segmentation/region_growing.h>
 
 //TODO: Cite Simone's Plane Detector Code
 using CallbackReturn = rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn;
@@ -80,12 +82,12 @@ void DeskDetector::compensated_cloudCB(const sensor_msgs::msg::PointCloud2::Cons
 
     pass.setInputCloud(in_cloud_pre_voxelized);
     pass.setFilterFieldName("x");
-    pass.setFilterLimits(0.0,10.0);
+    pass.setFilterLimits(0.0,6.0);
     pass.filter(*in_cloud_pre_voxelized);
 
     pcl::VoxelGrid<pcl::PointXYZ> vg;
     vg.setInputCloud(in_cloud_pre_voxelized);
-    vg.setLeafSize(0.02f, 0.02f, 0.02f); // 2 cm voxel grid
+    vg.setLeafSize(0.01f, 0.01f, 0.01f); // 2 cm voxel grid
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_filtered(new pcl::PointCloud<pcl::PointXYZ>);
     vg.filter(*in_cloud);
 
@@ -100,6 +102,9 @@ void DeskDetector::compensated_cloudCB(const sensor_msgs::msg::PointCloud2::Cons
     ec.setSearchMethod(tree);
     ec.setInputCloud(in_cloud);
     ec.extract(cluster_indices);
+
+
+
 
     int cluster_id = 0;
     visualization_msgs::msg::MarkerArray marker_array;
@@ -117,45 +122,104 @@ void DeskDetector::compensated_cloudCB(const sensor_msgs::msg::PointCloud2::Cons
         cluster->is_dense = true;
         RCLCPP_INFO(this->get_logger(), "Read Cluster number %d", cluster_id);
 
-        pcl::SACSegmentation<pcl::PointXYZ> seg;
-        seg.setOptimizeCoefficients(true);
-        seg.setModelType(pcl::SACMODEL_PERPENDICULAR_PLANE);
-        seg.setMethodType(pcl::SAC_RANSAC);
-        seg.setMaxIterations(1000);
-        seg.setDistanceThreshold(0.05);
-        seg.setAxis(Eigen::Vector3f(0.0, 0.0, 1.0));
-        // Accept surfaces within X degrees of horizontal
-        seg.setEpsAngle(pcl::deg2rad(20.0f)); // 10° tolerance
-        pcl::ExtractIndices<pcl::PointXYZ> extract;
+        pcl::NormalEstimation<pcl::PointXYZ, pcl::Normal> ne;
+        pcl::search::KdTree<pcl::PointXYZ>::Ptr tree(new pcl::search::KdTree<pcl::PointXYZ>);
+        pcl::PointCloud<pcl::Normal>::Ptr normals(new pcl::PointCloud<pcl::Normal>);
+        ne.setSearchMethod(tree);
+        ne.setInputCloud(cluster);
+        ne.setKSearch(30); // neighborhood for normal estimation
+        ne.compute(*normals);
 
-        pcl::ModelCoefficients::Ptr coefficients(new pcl::ModelCoefficients);
-        pcl::PointIndices::Ptr inliers(new pcl::PointIndices);
 
-        seg.setInputCloud(cluster);
-        seg.segment(*inliers, *coefficients);
+        // 2️⃣ Region growing based on normals + smoothness
+        pcl::RegionGrowing<pcl::PointXYZ, pcl::Normal> reg;
+        pcl::search::KdTree<pcl::PointXYZ>::Ptr reg_tree(new pcl::search::KdTree<pcl::PointXYZ>);
+        ne.setSearchMethod(reg_tree);
+        reg.setMinClusterSize(100);
+        reg.setMaxClusterSize(25000);
+        reg.setSearchMethod(reg_tree);
+        reg.setNumberOfNeighbours(30);
+        reg.setInputCloud(cluster);
+        reg.setInputNormals(normals);
 
-        if (inliers->indices.empty()) continue;
-        
+        // Allow small smooth curvature transitions
+        reg.setSmoothnessThreshold(pcl::deg2rad(10.0f)); // max angle between normals (10°)
+        reg.setCurvatureThreshold(1.0);
 
-        pcl::PointCloud<pcl::PointXYZ>::Ptr remaining(new pcl::PointCloud<pcl::PointXYZ>);
+        std::vector<pcl::PointIndices> sub_cluster;
+        reg.extract(sub_cluster);
 
+        for (const auto& sub : sub_cluster)
+        {
+            pcl::PointCloud<pcl::PointXYZ>::Ptr subcloud(new pcl::PointCloud<pcl::PointXYZ>);
+            for (int idx : sub.indices)
+                subcloud->push_back((*cluster)[idx]);
+
+            // Compute normals again for filtering (small cluster = faster)
+            pcl::NormalEstimation<pcl::PointXYZ, pcl::Normal> ne_sub;
+            ne_sub.setInputCloud(subcloud);
+            ne_sub.setSearchMethod(reg_tree);
+            ne_sub.setKSearch(20);
+            pcl::PointCloud<pcl::Normal>::Ptr sub_normals(new pcl::PointCloud<pcl::Normal>);
+            ne_sub.compute(*sub_normals);
+
+                // 2️⃣ Combine XYZ + normals
+            pcl::PointCloud<pcl::PointNormal>::Ptr cloud_with_normals(new pcl::PointCloud<pcl::PointNormal>);
+            pcl::concatenateFields(*subcloud, *sub_normals, *cloud_with_normals);
+
+            // 3️⃣ Filter out points whose normals are not horizontal
+            pcl::PointCloud<pcl::PointNormal>::Ptr horizontal_points(new pcl::PointCloud<pcl::PointNormal>);
+            for (const auto& pt : cloud_with_normals->points)
+            {
+                Eigen::Vector3f n(pt.normal_x, pt.normal_y, pt.normal_z);
+                float cos_angle = n.dot(Eigen::Vector3f(0, 0, 1)); // z-axis = "up"
+                if (std::abs(cos_angle) > std::cos(pcl::deg2rad(15.0f))) {
+                    horizontal_points->push_back(pt);
+                }
+            }      
+
+            // Optional: if too few points, skip this cluster
+            if (horizontal_points->size() < 100)
+                continue;
+
+
+            /*pcl::SACSegmentation<pcl::PointXYZ> seg;
+            seg.setOptimizeCoefficients(true);
+            seg.setModelType(pcl::SACMODEL_PERPENDICULAR_PLANE);
+            seg.setMethodType(pcl::SAC_RANSAC);
+            seg.setMaxIterations(1000);
+            seg.setDistanceThreshold(0.05);
+            seg.setAxis(Eigen::Vector3f(0.0, 0.0, 1.0));
+            // Accept surfaces within X degrees of horizontal
+            seg.setEpsAngle(pcl::deg2rad(3.0f)); // 10° tolerance
+            pcl::ExtractIndices<pcl::PointXYZ> extract;
+
+            pcl::ModelCoefficients::Ptr coefficients(new pcl::ModelCoefficients);
+            pcl::PointIndices::Ptr inliers(new pcl::PointIndices);
+
+            seg.setInputCloud(horizontal_points);
+            seg.segment(*inliers, *coefficients);
+
+            if (inliers->indices.empty()) continue;
+            
 
         // Normal vector (coefficients[0..2]), plane eq: ax+by+cz+d=0
-        Eigen::Vector3f normal(coefficients->values[0], coefficients->values[1], coefficients->values[2]);
-        normal.normalize();
+            Eigen::Vector3f normal(coefficients->values[0], coefficients->values[1], coefficients->values[2]);
+            normal.normalize();
 
-        if (fabs(normal.dot(Eigen::Vector3f::UnitZ())) > 0.9) 
-        {
+            if (fabs(normal.dot(Eigen::Vector3f::UnitZ())) > 0.90) 
+            {*/
 
             RCLCPP_INFO(this->get_logger(), "Got something close to horizontal with size %d.",cluster->size());
     
             // remove ground points but don’t publish them
-            extract.setInputCloud(cluster);
+            /*extract.setInputCloud(cluster);
             extract.setIndices(inliers);
             extract.setNegative(true);
             pcl::PointCloud<pcl::PointXYZ>::Ptr plane(new pcl::PointCloud<pcl::PointXYZ>);
-            extract.filter(*plane);
-            
+            extract.filter(*plane);*/
+            pcl::PointCloud<pcl::PointXYZ>::Ptr plane(new pcl::PointCloud<pcl::PointXYZ>);
+            pcl::copyPointCloud(*horizontal_points, *plane);
 
             Eigen::Vector4f centroid;
             pcl::compute3DCentroid(*plane, centroid);
