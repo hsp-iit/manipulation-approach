@@ -7,6 +7,7 @@ import groundingdino.datasets.transforms as T
 import cv2
 
 import torch
+from torchvision.ops import box_convert
 # ROS2
 import rclpy
 from rclpy.executors import MultiThreadedExecutor
@@ -16,18 +17,18 @@ from sensor_msgs.msg import PointCloud2, CameraInfo, Image
 from tf2_ros import TransformListener, Buffer
 import message_filters
 
-from ultralytics import YOLOWorld
+from ultralytics import YOLOWorld, SAM
 
 
-TEXT_PROMPT = "chair . laptop . mouse . bag . box . backpack . mug . bottle"
+TEXT_PROMPT = "bottle"
 BOX_TRESHOLD = 0.35
 TEXT_TRESHOLD = 0.25
 
-def numpy_to_ros2_image(rgb: np.ndarray, stamp, frame_id="camera_rgb_frame") -> Image:
+def numpy_to_ros2_image(rgb: np.ndarray, stamp, frame_id="camera_rgb_frame", encoding = 'bgr8') -> Image:
     msg = Image()
     msg.height = rgb.shape[0]
     msg.width = rgb.shape[1]
-    msg.encoding = 'bgr8'
+    msg.encoding = encoding
     msg.is_bigendian = False
     msg.step = rgb.shape[1] * 3
     msg.data = rgb.tobytes()
@@ -55,7 +56,7 @@ class ObjectDetector(Node):
                 ('robot_base_frame','geometric_unicycle'),  # mobile_base_body_link for R1, geometric_unicycle for ergoCub
                 ('object_pointcloud_topic', 'seg_object_pointcloud')
                 ])
-
+        self.use_yolo = False   # TODO remove
         # Name of the rgb image topic
         img_topic = self.get_parameter('img_topic_name').value
         # Name of the depth image topic
@@ -103,13 +104,16 @@ class ObjectDetector(Node):
         # DINO model
         self.dino_model = load_model("/home/user1/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py", "/home/user1/GroundingDINO/weights/groundingdino_swint_ogc.pth")
         # YOLO
-        self.yolo = YOLOWorld("yolov8l-worldv2")
-        self.yolo.set_classes(["chair" , "laptop" , "mouse" , "bag" , "box" , "backpack" , "mug" , "bottle"])
-        
+        if self.use_yolo:
+            self.yolo = YOLOWorld("yolov8l-worldv2")
+            self.yolo.set_classes(["chair" , "laptop" , "mouse" , "bag" , "box" , "backpack" , "mug" , "bottle"])
+            self.annotated_yolo_pub = self.create_publisher(Image, "/annotated_yolo_img", 10)
+        # SAM
+        self.sam = SAM("sam2.1_l.pt")
+        self.annotated_sam_pub = self.create_publisher(Image, "/sam_mask_img", 10)
 
         # Annotated img pub (debug only)
         self.annotated_img_pub = self.create_publisher(Image, "/annotated_dino_img", 10)
-        self.annotated_yolo_pub = self.create_publisher(Image, "/annotated_yolo_img", 10)
 
 
     def camera_callback(self, img_msg : Image, depth_msg : Image):
@@ -120,6 +124,7 @@ class ObjectDetector(Node):
         #depth = np.frombuffer(depth_msg.data, dtype=np.float32).reshape(depth_msg.height, depth_msg.width)
         #depth_torch = torch.tensor(depth, device=self.device)
 
+        # Image preparation for model
         transform = T.Compose(
             [
                 T.RandomResize([800], max_size=1333),
@@ -129,7 +134,7 @@ class ObjectDetector(Node):
         )
         image_pillow = PIL_Image.fromarray(cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB))
         image_transformed, _ = transform(image_pillow, None)
-        
+        # Find categories
         boxes, logits, phrases = predict(
             model=self.dino_model,
             image=image_transformed,
@@ -137,18 +142,44 @@ class ObjectDetector(Node):
             box_threshold=BOX_TRESHOLD,
             text_threshold=TEXT_TRESHOLD
         )
-
+        # Debug pub
+        #if len(logits) > 0:
         annotated_frame = annotate(image_source=rgb, boxes=boxes, logits=logits, phrases=phrases)
         debug_img_msg = numpy_to_ros2_image(annotated_frame, img_msg.header.stamp, img_msg.header.frame_id)
         self.annotated_img_pub.publish(debug_img_msg)
 
-        # Compare with yolo
-        yolo_results = self.yolo.predict(rgb)
-        yolo_annotated_rgb = yolo_results[0].plot()
-        yolo_annotated_bgr = cv2.cvtColor(yolo_annotated_rgb, cv2.COLOR_RGB2BGR)
-        yolo_debug_img_msg = numpy_to_ros2_image(yolo_annotated_bgr, img_msg.header.stamp, img_msg.header.frame_id)
-        self.annotated_yolo_pub.publish(yolo_debug_img_msg)
-        # Segment with SAM2
+        # Compare with yolo (TODO remove)
+        if self.use_yolo:
+            yolo_results = self.yolo.predict(rgb)
+            yolo_annotated_rgb = yolo_results[0].plot()
+            yolo_annotated_bgr = cv2.cvtColor(yolo_annotated_rgb, cv2.COLOR_RGB2BGR)
+            yolo_debug_img_msg = numpy_to_ros2_image(yolo_annotated_bgr, img_msg.header.stamp, img_msg.header.frame_id)
+            self.annotated_yolo_pub.publish(yolo_debug_img_msg)
+
+
+        
+        if len(logits) > 0:
+            # Find bbox with higher score
+            highest_score = logits.max()
+            bbox = boxes[logits == highest_score]
+            # Convert bbox
+            h, w, _ = rgb.shape
+            bbox = bbox * torch.Tensor([w, h, w, h])
+            xyxy = box_convert(boxes=bbox, in_fmt="cxcywh", out_fmt="xyxy").cpu().numpy()
+
+            # Segment with SAM2
+            sam_results = self.sam.predict(rgb, bboxes=xyxy, labels=[1])
+            mask = sam_results[0].masks.data.cpu().numpy()
+            mask = mask.astype(np.uint8)
+            #color = np.random.randint(0, 255, (3,), dtype=np.uint8)
+            color_red = np.array([255, 0, 0], dtype=np.uint8)
+            colored_mask = np.zeros_like(rgb, dtype=np.uint8)
+            overlay = rgb.copy()
+            for c in range(3):
+                colored_mask[:, :, c] = mask * color_red[c]
+            overlay = cv2.addWeighted(overlay, 1.0, colored_mask, 0.5, 0)
+            sam_img = numpy_to_ros2_image(overlay, img_msg.header.stamp, img_msg.header.frame_id, encoding = 'rgb8')
+            self.annotated_sam_pub.publish(sam_img)
 
 
     def camera_info_callback(self, msg : CameraInfo):
