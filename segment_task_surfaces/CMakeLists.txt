@@ -7,65 +7,21 @@ endif()
 
 # find dependencies
 find_package(ament_cmake REQUIRED)
-# find dependencies
-find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
-find_package(lifecycle_msgs REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_msgs REQUIRED)
-find_package(nav_msgs REQUIRED)
-find_package(nav_2d_msgs REQUIRED)
-find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
-
-find_package(laser_geometry REQUIRED)
-find_package(pcl_conversions REQUIRED)
-FIND_PACKAGE(YARP COMPONENTS os sig dev REQUIRED)
-find_package(PCL 1.2 REQUIRED)
 find_package(pcl_ros REQUIRED)
-
-find_package(nav2_common REQUIRED)
-find_package(nav2_core REQUIRED)
-find_package(nav2_costmap_2d REQUIRED)
-find_package(nav2_util REQUIRED)
-find_package(pluginlib REQUIRED)
-find_package(visualization_msgs REQUIRED)
-find_package(std_srvs REQUIRED)
-find_package(tf2_kdl REQUIRED)
-find_package(tf2_eigen)
-
 find_package(tf2_sensor_msgs REQUIRED)
-
-find_package(rclcpp_action REQUIRED)
-find_package(tf2_geometry_msgs REQUIRED)
 find_package(tf2_eigen REQUIRED)
-
-find_package(rosidl_default_generators REQUIRED)
-
-
-#include_directories(/opt/ros/humble/include/tf2_geometry_msgs)
-#include_directories(/opt/ros/humble/include/tf2)
-#include_directories(/opt/ros/humble/include/tf2_ros)
-#include_directories(/opt/ros/humble/include/laser_geometry)
-#include_directories(/opt/ros/humble/include/pcl_conversions)
-#include_directories(include)
 include_directories(${PCL_INCLUDE_DIRS})
 link_directories(${PCL_LIBRARY_DIRS})
 add_definitions(${PCL_DEFINITIONS})
-include_directories(/opt/ros/iron/include/tf2_geometry_msgs)
-include_directories(/opt/ros/iron/include/tf2)
-include_directories(/opt/ros/iron/include/tf2_ros)
-include_directories(/opt/ros/iron/include/laser_geometry)
-include_directories(/opt/ros/iron/include/pcl_conversions)
 include_directories(include)
-#add_subdirectory(interfaces)
-# uncomment the following section in order to fill in
-# further dependencies manually.
-# find_package(<dependency> REQUIRED)
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)

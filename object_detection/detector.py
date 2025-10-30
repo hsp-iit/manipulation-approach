@@ -71,9 +71,9 @@ def project_depth_to_pc_torch(depth : torch.Tensor, color_img : torch.Tensor, ca
 
     # filter depth coords based on z distance
     uu, vv = torch.where((depth > min_depth) & (depth < max_depth))
-    coords = torch.stack((uu, vv), dim=1)
-    uu = coords[:, 0]
-    vv = coords[:, 1]
+    full_xx = (vv - cx) * depth[uu, vv] / fx
+    full_yy = (uu - cy) * depth[uu, vv] / fy
+    full_zz = depth[uu, vv] / depth_factor
     xx = (vv - cx) * depth[uu, vv] * mask_torch[0][uu, vv] / fx
     yy = (uu - cy) * depth[uu, vv] * mask_torch[0][uu, vv]/ fy
     zz = depth[uu, vv] * mask_torch[0][uu, vv] / depth_factor
@@ -83,8 +83,9 @@ def project_depth_to_pc_torch(depth : torch.Tensor, color_img : torch.Tensor, ca
     zz = zz[condition]
     color = color_img[uu, vv, :]
     color_cpu = color[condition].detach().cpu().numpy()
-
+    full_color_cpu = color.detach().cpu().numpy()
     pointcloud = torch.cat((xx.unsqueeze(1), yy.unsqueeze(1), zz.unsqueeze(1)), 1).detach().cpu().numpy()
+    full_pointcloud = torch.cat((full_xx.unsqueeze(1), full_yy.unsqueeze(1), full_zz.unsqueeze(1)), 1).detach().cpu().numpy()
     #uu, vv = uu.cpu().detach().numpy(), vv.detach().cpu().numpy()
 
     header = Header()
@@ -97,7 +98,6 @@ def project_depth_to_pc_torch(depth : torch.Tensor, color_img : torch.Tensor, ca
     fields = [PointField(name=n, offset=i*itemsize, datatype=ros_dtype, count=1) for i, n in enumerate('xyzrgb')]
     nbytes = 6
     xyzrgb = np.array(np.hstack([pointcloud, color_cpu/255]), dtype=np.float32)
-    #xyzrgb = np.array(points_ren, dtype=np.float32)
     msg = PointCloud2(header=header, 
                       height = 1, 
                       width= pointcloud.shape[0], 
@@ -107,7 +107,19 @@ def project_depth_to_pc_torch(depth : torch.Tensor, color_img : torch.Tensor, ca
                       point_step=(itemsize * nbytes), 
                       row_step = (itemsize * nbytes * pointcloud.shape[0]), 
                       data=xyzrgb.tobytes())
-    return msg
+    #
+    full_xyzrgb = np.array(np.hstack([full_pointcloud, full_color_cpu/255]), dtype=np.float32)
+    full_msg = PointCloud2(header=header, 
+                      height = 1, 
+                      width= full_pointcloud.shape[0], 
+                      fields=fields, 
+                      is_dense= False, 
+                      is_bigedian=False, 
+                      point_step=(itemsize * nbytes), 
+                      row_step = (itemsize * nbytes * full_pointcloud.shape[0]), 
+                      data=full_xyzrgb.tobytes())
+
+    return msg, full_msg
 
 class ObjectDetector(Node): 
     def __init__(self):
@@ -124,7 +136,8 @@ class ObjectDetector(Node):
                 ('depth_downsampling', 10),     #10 for resolution 640x480 36 for res 1280x720
                 ('camera_reference_frame', "realsense_compensated"),  # Reference frame of the camera, if empty will use the one from the ros message
                 ('robot_base_frame','geometric_unicycle'),  # mobile_base_body_link for R1, geometric_unicycle for ergoCub
-                ('object_pointcloud_topic', 'seg_object_pointcloud')
+                ('object_pointcloud_topic', 'seg_object_pointcloud'),
+                ('full_pointcloud_topic', 'full_pointcloud'),
                 ])
         self.use_yolo = False   # TODO remove
         # Name of the rgb image topic
@@ -141,7 +154,9 @@ class ObjectDetector(Node):
         self.camera_reference_frame = self.get_parameter('camera_reference_frame').value
         # Base frame of the robot, counts as the robot pose
         self.robot_base_frame = self.get_parameter("robot_base_frame").value
+        # Topic names
         self.object_pointcloud_topic = self.get_parameter("object_pointcloud_topic").value
+        self.full_pointcloud_topic = self.get_parameter("full_pointcloud_topic").value
         self.device = "cuda"
 
         self.get_logger().info(f'Using parameters: {img_topic=}  {depth_topic=}  {use_camera_info_topic=}  {camera_info_topic=} \n'
@@ -161,16 +176,17 @@ class ObjectDetector(Node):
             self.camera_info_available = True
         
         ### tf2
-        self.tf_buffer = Buffer()
-        self.tf_listener = TransformListener(self.tf_buffer, self)
+        #self.tf_buffer = Buffer()
+        #self.tf_listener = TransformListener(self.tf_buffer, self)
 
         ### ROS2 subscribers
         self.img_sub = message_filters.Subscriber(self, Image, img_topic)
         self.depth_sub = message_filters.Subscriber(self, Image, depth_topic)
-        self.tss = message_filters.ApproximateTimeSynchronizer([self.img_sub, self.depth_sub], 1, slop=0.3)   
+        self.tss = message_filters.ApproximateTimeSynchronizer([self.img_sub, self.depth_sub], 1, slop=0.1)   
         self.tss.registerCallback(self.camera_callback)
-
+        # Publishers
         self.object_pointcloud_pub = self.create_publisher(PointCloud2, self.object_pointcloud_topic, 10)
+        self.full_pointcloud_pub = self.create_publisher(PointCloud2, self.full_pointcloud_topic, 10)
 
         # DINO model
         self.dino_model = load_model("/home/user1/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py", "/home/user1/GroundingDINO/weights/groundingdino_swint_ogc.pth")
@@ -251,8 +267,9 @@ class ObjectDetector(Node):
             sam_img = numpy_to_ros2_image(overlay, img_msg.header.stamp, img_msg.header.frame_id, encoding = 'rgb8')
             self.annotated_sam_pub.publish(sam_img)
             # Convert to pointcloud2
-            pc_msg = project_depth_to_pc_torch(depth_torch, rgb_torch, self.calib_mat, self.camera_reference_frame, depth_msg.header.stamp, mask=mask)
+            pc_msg, full_pc_msg = project_depth_to_pc_torch(depth_torch, rgb_torch, self.calib_mat, self.camera_reference_frame, depth_msg.header.stamp, mask=mask, max_depth=3.0)
             self.object_pointcloud_pub.publish(pc_msg)
+            self.full_pointcloud_pub.publish(full_pc_msg)
 
     def camera_info_callback(self, msg : CameraInfo):
         """

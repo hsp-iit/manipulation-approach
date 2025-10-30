@@ -15,25 +15,26 @@
 
 #include "rclcpp_lifecycle/lifecycle_node.hpp"
 #include "rclcpp_lifecycle/lifecycle_publisher.hpp"
-
+#include <string>
 
 class DeskDetector : public rclcpp_lifecycle::LifecycleNode
 {
     private:
-        
         std::string pointcloud_topic_name_;
         double min_desk_height_ = 0.3;
         double max_desk_height_ = 1.5;
-
         std::shared_ptr<tf2_ros::TransformListener> m_tf_listener_{nullptr};
         std::unique_ptr<tf2_ros::Buffer> m_tf_buffer_in_;
         std::shared_ptr<tf2_ros::TransformBroadcaster> m_tf_broadcaster_;
         std::shared_ptr<tf2_ros::StaticTransformBroadcaster> m_static_tf_broadcaster_;
+        std::string m_reference_frame = "geometric_unicycle";
+        bool m_debug_publish = true;
 
         void compensated_cloudCB(const sensor_msgs::msg::PointCloud2::ConstPtr& pc_in);
 
         rclcpp_lifecycle::LifecyclePublisher<visualization_msgs::msg::MarkerArray>::SharedPtr m_markers_to_edge_pub_;
         rclcpp_lifecycle::LifecyclePublisher<visualization_msgs::msg::MarkerArray>::SharedPtr horizontal_surfaces_pub_;
+        rclcpp_lifecycle::LifecyclePublisher<sensor_msgs::msg::PointCloud2>::SharedPtr m_plane_pub;
 
         rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr m_pc_sub_;
     
@@ -49,8 +50,4 @@ class DeskDetector : public rclcpp_lifecycle::LifecycleNode
         CallbackReturn on_cleanup(const rclcpp_lifecycle::State &);
         CallbackReturn on_shutdown(const rclcpp_lifecycle::State & state);
         CallbackReturn on_error(const rclcpp_lifecycle::State & state);
-
-
-
-
 };

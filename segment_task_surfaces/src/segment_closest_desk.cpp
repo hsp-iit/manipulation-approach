@@ -41,22 +41,19 @@ void DeskDetector::compensated_cloudCB(const sensor_msgs::msg::PointCloud2::Cons
     pcl::PointCloud<pcl::PointXYZ>::Ptr in_cloud (new pcl::PointCloud<pcl::PointXYZ>);
     pcl::PointCloud<pcl::PointXYZ>::Ptr in_cloud_pre_filter (new pcl::PointCloud<pcl::PointXYZ>);
     pcl::PointCloud<pcl::PointXYZ>::Ptr in_cloud_pre_voxelized (new pcl::PointCloud<pcl::PointXYZ>);
-
-
-
     sensor_msgs::msg::PointCloud2 realsense_cloud;
     std::string transform_error;
     geometry_msgs::msg::TransformStamped realsense_to_foot_tf, realsense_frame_to_XYZ;
     if (m_tf_buffer_in_->canTransform(
                 pc_in->header.frame_id,
-                "l_sole",
+                m_reference_frame,
                 pc_in->header.stamp,
-                tf2::durationFromSec(0.02),  
+                tf2::durationFromSec(0),
                 & transform_error ))
     {
         try
         {
-            realsense_cloud = m_tf_buffer_in_->transform(*pc_in, "l_sole", tf2::durationFromSec(0.0));
+            realsense_cloud = m_tf_buffer_in_->transform(*pc_in, m_reference_frame, tf2::durationFromSec(0.0));
         }
         catch(const std::exception& e)
         {
@@ -64,16 +61,59 @@ void DeskDetector::compensated_cloudCB(const sensor_msgs::msg::PointCloud2::Cons
            return;
         }
     }
+    else
+    {
+        return;
+    }
+    
     
     RCLCPP_INFO(this->get_logger(), "GOTT HERE %s ==================================\n",pc_in->header.frame_id.c_str());
     pcl::fromROSMsg(realsense_cloud, *in_cloud_pre_filter);
-
+    // Filter height of the plane underneath the object
     pcl::PassThrough<pcl::PointXYZ> pass;
     pass.setInputCloud(in_cloud_pre_filter);
     pass.setFilterFieldName("z");
     pass.setFilterLimits(min_desk_height_, max_desk_height_);
     pass.filter(*in_cloud_pre_voxelized);
 
+    // RANSAC
+    pcl::ModelCoefficients::Ptr coefficients (new pcl::ModelCoefficients);
+    pcl::PointIndices::Ptr inliers (new pcl::PointIndices);
+
+    pcl::SACSegmentation<pcl::PointXYZ> seg;
+    seg.setOptimizeCoefficients(true);
+    seg.setModelType(pcl::SACMODEL_PARALLEL_PLANE);
+    seg.setAxis(Eigen::Vector3f::UnitX());  // Should be Z, but here we are in the camera frame
+    seg.setEpsAngle(0.02);  //0.087 -> 5deg
+    seg.setMethodType(pcl::SAC_RANSAC);
+    seg.setMaxIterations(1000);
+    seg.setDistanceThreshold(0.01); // TODO parameterize
+    
+    seg.setInputCloud(in_cloud_pre_voxelized);
+    seg.segment(*inliers, *coefficients);
+    if (inliers->indices.size() == 0)
+    {
+        RCLCPP_ERROR(get_logger(), "Could not estimate a planar model for the given cloud.");
+        return;
+    }
+    // Extract plane points
+    sensor_msgs::msg::PointCloud2 plane_cloud;
+    if (m_debug_publish)
+    {
+        pcl::ExtractIndices<pcl::PointXYZ> extract;
+        extract.setInputCloud(in_cloud_pre_voxelized);
+        extract.setIndices(inliers);
+        extract.setNegative(false);
+        pcl::PointCloud<pcl::PointXYZ>::Ptr plane_points (new pcl::PointCloud<pcl::PointXYZ>);
+        extract.filter(*plane_points);
+
+        pcl::toROSMsg(*plane_points, plane_cloud);
+        plane_cloud.header.stamp = realsense_cloud.header.stamp;
+        plane_cloud.header.frame_id = realsense_cloud.header.frame_id;
+        m_plane_pub->publish(plane_cloud);
+    }
+    return;
+    /*
     pass.setInputCloud(in_cloud_pre_voxelized);
     pass.setFilterFieldName("y");
     pass.setFilterLimits(-8.0, 8.0);
@@ -84,6 +124,7 @@ void DeskDetector::compensated_cloudCB(const sensor_msgs::msg::PointCloud2::Cons
     pass.setFilterFieldName("x");
     pass.setFilterLimits(0.0,6.0);
     pass.filter(*in_cloud_pre_voxelized);
+    */
 
     pcl::VoxelGrid<pcl::PointXYZ> vg;
     vg.setInputCloud(in_cloud_pre_voxelized);
@@ -163,7 +204,7 @@ void DeskDetector::compensated_cloudCB(const sensor_msgs::msg::PointCloud2::Cons
             pcl::PointCloud<pcl::Normal>::Ptr sub_normals(new pcl::PointCloud<pcl::Normal>);
             ne_sub.compute(*sub_normals);
 
-                // 2️⃣ Combine XYZ + normals
+            // 2️⃣ Combine XYZ + normals
             pcl::PointCloud<pcl::PointNormal>::Ptr cloud_with_normals(new pcl::PointCloud<pcl::PointNormal>);
             pcl::concatenateFields(*subcloud, *sub_normals, *cloud_with_normals);
 
@@ -210,7 +251,7 @@ void DeskDetector::compensated_cloudCB(const sensor_msgs::msg::PointCloud2::Cons
             if (fabs(normal.dot(Eigen::Vector3f::UnitZ())) > 0.90) 
             {*/
 
-            RCLCPP_INFO(this->get_logger(), "Got something close to horizontal with size %d.",cluster->size());
+            RCLCPP_INFO(this->get_logger(), "Got something close to horizontal with size %li.",cluster->size());
     
             // remove ground points but don’t publish them
             /*extract.setInputCloud(cluster);
@@ -287,9 +328,6 @@ void DeskDetector::compensated_cloudCB(const sensor_msgs::msg::PointCloud2::Cons
     clear_marker.action = visualization_msgs::msg::Marker::DELETEALL;
     marker_array.markers.insert(marker_array.markers.begin(), clear_marker);
     horizontal_surfaces_pub_->publish(marker_array);
-
-
-
 }
 
 CallbackReturn DeskDetector::on_configure(const rclcpp_lifecycle::State &)
@@ -311,6 +349,7 @@ CallbackReturn DeskDetector::on_configure(const rclcpp_lifecycle::State &)
     
     //Publisher
     horizontal_surfaces_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("/desk_detector/horizontal_surfaces", 10);
+    m_plane_pub = this->create_publisher<sensor_msgs::msg::PointCloud2>("/detected_plane", 10);
 
     return CallbackReturn::SUCCESS;
 }
@@ -321,7 +360,7 @@ CallbackReturn DeskDetector::on_activate(const rclcpp_lifecycle::State &)
 {
     RCLCPP_INFO(get_logger(), "Activating");
     horizontal_surfaces_pub_->on_activate();
-    
+    m_plane_pub->on_activate();
     return CallbackReturn::SUCCESS;
 }
 
@@ -329,6 +368,7 @@ CallbackReturn DeskDetector::on_deactivate(const rclcpp_lifecycle::State &)
 {
     RCLCPP_INFO(get_logger(), "Deactivating");
     horizontal_surfaces_pub_->on_deactivate();
+    m_plane_pub->on_deactivate();
     return CallbackReturn::SUCCESS;
 }
 
@@ -336,6 +376,7 @@ CallbackReturn DeskDetector::on_cleanup(const rclcpp_lifecycle::State &)
 {
     RCLCPP_INFO(get_logger(), "Cleaning Up");
     horizontal_surfaces_pub_.reset();
+    m_plane_pub.reset();
     m_pc_sub_.reset();
     return CallbackReturn::SUCCESS;
 }
