@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025 Humanoid Sensing and Perception, Istituto Italiano di Tecnologia
+// SPDX-License-Identifier: BSD-3-Clause
+// Author: Vignesh Sushrutha Raghavan
 #include "segment_task_surfaces/segment_closest_desk.hpp"
 #include <pcl_conversions/pcl_conversions.h>
 #include <pcl/common/impl/angles.hpp>

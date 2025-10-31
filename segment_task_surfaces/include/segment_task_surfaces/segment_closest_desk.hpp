@@ -1,6 +1,6 @@
-/**
- * 
- */
+// SPDX-FileCopyrightText: 2025 Humanoid Sensing and Perception, Istituto Italiano di Tecnologia
+// SPDX-License-Identifier: BSD-3-Clause
+//Author: Vignesh Sushrutha Raghavan
 #include "rclcpp/rclcpp.hpp"
 #include "tf2_ros/transform_listener.h"
 #include "tf2_ros/buffer.h"

@@ -1,7 +1,10 @@
+# SPDX-FileCopyrightText: 2025 Humanoid Sensing and Perception, Istituto Italiano di Tecnologia
+# SPDX-License-Identifier: BSD-3-Clause
+# Author: Simone Micheletti
 import numpy as np
 
 # Grounding DINO
-from groundingdino.util.inference import load_model, load_image, predict, annotate
+from groundingdino.util.inference import load_model, predict, annotate
 from PIL import Image as PIL_Image
 import groundingdino.datasets.transforms as T
 import cv2
@@ -133,7 +136,6 @@ class ObjectDetector(Node):
                 ('camera_info_topic', "/camera/rgbd/camera_info"),   # ergocub: /camera/rgbd/camera_info
                 ('use_camera_info_topic', True),
                 ('cam_calib_mat', [386.0, 0.0, 321.0, 0.0, 386.0, 238.0, 0.0, 0.0, 1.0]),
-                ('depth_downsampling', 10),     #10 for resolution 640x480 36 for res 1280x720
                 ('camera_reference_frame', "realsense_compensated"),  # Reference frame of the camera, if empty will use the one from the ros message
                 ('robot_base_frame','geometric_unicycle'),  # mobile_base_body_link for R1, geometric_unicycle for ergoCub
                 ('object_pointcloud_topic', 'seg_object_pointcloud'),
@@ -148,8 +150,6 @@ class ObjectDetector(Node):
         use_camera_info_topic = self.get_parameter('use_camera_info_topic').value
         # Name of the camera_info topic
         camera_info_topic = self.get_parameter('camera_info_topic').value
-        # category list to display frame by frame
-        self.depth_downsampling = self.get_parameter('depth_downsampling').value
         # Reference frame of the camera, if empty will use the one from the ros message
         self.camera_reference_frame = self.get_parameter('camera_reference_frame').value
         # Base frame of the robot, counts as the robot pose
@@ -160,7 +160,7 @@ class ObjectDetector(Node):
         self.device = "cuda"
 
         self.get_logger().info(f'Using parameters: {img_topic=}  {depth_topic=}  {use_camera_info_topic=}  {camera_info_topic=} \n'
-                               f'{self.object_pointcloud_topic=}  {self.robot_base_frame=}  {self.depth_downsampling=}')
+                               f'{self.object_pointcloud_topic=}  {self.robot_base_frame=}')
 
         # Enable camera ingo subscriber or load params
         if use_camera_info_topic == True:
@@ -192,7 +192,7 @@ class ObjectDetector(Node):
         self.dino_model = load_model("/home/user1/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py", "/home/user1/GroundingDINO/weights/groundingdino_swint_ogc.pth")
         # Annotated img pub (debug only)
         self.annotated_img_pub = self.create_publisher(Image, "/annotated_dino_img", 10)
-        # YOLO
+        # YOLO (TODO remove)
         if self.use_yolo:
             self.yolo = YOLOWorld("yolov8l-worldv2")
             self.yolo.set_classes(["chair" , "laptop" , "mouse" , "bag" , "box" , "backpack" , "mug" , "bottle"])
@@ -243,7 +243,7 @@ class ObjectDetector(Node):
             self.annotated_yolo_pub.publish(yolo_debug_img_msg)
 
 
-        
+        # If found something:
         if len(logits) > 0:
             # Find bbox with higher score
             highest_score = logits.max()
@@ -257,7 +257,6 @@ class ObjectDetector(Node):
             sam_results = self.sam.predict(rgb, bboxes=xyxy, labels=[1])
             mask_bool = sam_results[0].masks.data.cpu().numpy()
             mask = mask_bool.astype(np.uint8)
-            #color = np.random.randint(0, 255, (3,), dtype=np.uint8)
             color_red = np.array([255, 0, 0], dtype=np.uint8)
             colored_mask = np.zeros_like(rgb, dtype=np.uint8)
             overlay = rgb.copy()
