@@ -7,6 +7,7 @@ endif()
 
 # find dependencies
 find_package(ament_cmake REQUIRED)
+find_package(OpenCV REQUIRED)
 # find dependencies
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
@@ -95,7 +96,7 @@ ament_target_dependencies(desk_detector
   "pcl_ros"
   "tf2_eigen"
 )
-target_link_libraries(desk_detector ${PCL_LIBRARIES})
+target_link_libraries(desk_detector ${PCL_LIBRARIES} ${OpenCV_LIBS})
 
 install(DIRECTORY
   launch

@@ -17,6 +17,11 @@
 #include <pcl/features/normal_3d.h>
 #include <tf2_eigen/tf2_eigen.hpp>
 #include <pcl/segmentation/region_growing.h>
+#include <pcl/common/common.h>
+#include <opencv2/core.hpp>
+#include <opencv2/imgproc.hpp>
+#include <opencv2/highgui.hpp>   // optional, only if you want to visualize the contour
+#include <opencv2/opencv.hpp>  
 
 //TODO: Cite Simone's Plane Detector Code
 using CallbackReturn = rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn;
@@ -172,7 +177,7 @@ void DeskDetector::compensated_cloudCB(const sensor_msgs::msg::PointCloud2::Cons
             for (const auto& pt : cloud_with_normals->points)
             {
                 Eigen::Vector3f n(pt.normal_x, pt.normal_y, pt.normal_z);
-                float cos_angle = n.dot(Eigen::Vector3f(0, 0, 1)); // z-axis = "up"
+                float cos_angle = n.normalized().dot(Eigen::Vector3f(0.0, 0.0, 1.0)); // z-axis = "up"
                 if (std::abs(cos_angle) > std::cos(pcl::deg2rad(15.0f))) {
                     horizontal_points->push_back(pt);
                 }
@@ -225,11 +230,55 @@ void DeskDetector::compensated_cloudCB(const sensor_msgs::msg::PointCloud2::Cons
             pcl::compute3DCentroid(*plane, centroid);
 
             // ---- Compute convex hull ----
-            pcl::ConvexHull<pcl::PointXYZ> chull;
+            /*pcl::ConvexHull<pcl::PointXYZ> chull;
             pcl::PointCloud<pcl::PointXYZ>::Ptr hull_points(new pcl::PointCloud<pcl::PointXYZ>);
             chull.setInputCloud(plane);
             chull.setDimension(2);
-            chull.reconstruct(*hull_points);
+            chull.reconstruct(*hull_points);*/
+
+            Eigen::Vector4f min_plane, max_plane;
+            pcl::getMinMax3D(*plane,min_plane,max_plane);
+
+            std::vector<cv::Point2f> projected_2d;
+            for (const auto& p : plane->points) 
+            {
+                Eigen::Vector3f pt(p.x, p.y, p.z);
+                projected_2d.emplace_back(pt(1)-min_plane(1), pt(0)-min_plane(0));
+            }
+            
+            float scale = 50.0; // pixels per meter (adjust)
+            cv::Rect2f bbox = cv::boundingRect(projected_2d);  // compute limits
+
+            cv::Mat img = cv::Mat::zeros(bbox.height * scale + 20, bbox.width * scale + 20, CV_8UC1);
+
+            // Draw projected points
+            for (const auto& p : projected_2d) {
+                int u = static_cast<int>((p.x - bbox.x) * scale);
+                int v = static_cast<int>((p.y - bbox.y) * scale);
+                if (u >= 0 && v >= 0 && u < img.cols && v < img.rows)
+                    img.at<uchar>(v, u) = 255;
+            }
+
+            cv::GaussianBlur(img, img, cv::Size(3,3), 0);
+
+            // Contour extraction
+            std::vector<std::vector<cv::Point>> contours;
+            cv::findContours(img, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_NONE);
+
+            pcl::PointCloud<pcl::PointXYZ>::Ptr edge_points(new pcl::PointCloud<pcl::PointXYZ>);
+
+            for(auto &contour : contours)
+            {
+                for (auto& pt : contour) {
+                    float y_local = pt.x / scale + bbox.x;
+                    float x_local = pt.y / scale + bbox.y;
+
+                    Eigen::Vector3f p3 (x_local ,y_local,centroid(2));
+                    edge_points->push_back(pcl::PointXYZ(p3.x()+min_plane(0), p3.y()+min_plane(1), p3.z()));
+                }
+            }
+
+
 
             // ---- Create centroid marker ----
             visualization_msgs::msg::Marker centroid_marker;
@@ -263,11 +312,11 @@ void DeskDetector::compensated_cloudCB(const sensor_msgs::msg::PointCloud2::Cons
             hull_marker.color.b = 0.0f;
             hull_marker.color.a = 1.0f;
 
-            for (size_t i = 0; i < hull_points->points.size(); ++i) {
+            for (size_t i = 0; i < edge_points->points.size(); ++i) {
                 geometry_msgs::msg::Point p;
-                p.x = hull_points->points[i].x;
-                p.y = hull_points->points[i].y;
-                p.z = hull_points->points[i].z;
+                p.x = edge_points->points[i].x;
+                p.y = edge_points->points[i].y;
+                p.z = edge_points->points[i].z;
                 hull_marker.points.push_back(p);
             }
             // close the loop
