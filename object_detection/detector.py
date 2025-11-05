@@ -13,15 +13,22 @@ import torch
 from torchvision.ops import box_convert
 # ROS2
 import rclpy
+import time
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from std_msgs.msg import Header
 from sensor_msgs.msg import PointCloud2, CameraInfo, Image, PointField
+from visualization_msgs.msg import Marker, MarkerArray
+from geometry_msgs.msg import Point
 from tf2_ros import TransformListener, Buffer
 import message_filters
-
+import open3d as o3d
+import tf2_sensor_msgs.tf2_sensor_msgs as tf2_sensor_msgs
 from ultralytics import YOLOWorld, SAM
-
+from sensor_msgs_py import point_cloud2
+from scipy.spatial import cKDTree
+from shapely import Polygon
+from shapely import Point as Point_Shapely
 
 TEXT_PROMPT = "bottle"
 BOX_TRESHOLD = 0.35
@@ -41,6 +48,24 @@ def numpy_to_ros2_image(rgb: np.ndarray, stamp, frame_id="camera_rgb_frame", enc
     msg.header.frame_id = frame_id
 
     return msg
+
+def numpy_to_pc2_msg(pointcloud: np.ndarray, color: np.ndarray, header):
+    ros_dtype = PointField.FLOAT32
+    dtype = np.float32
+    itemsize = np.dtype(dtype).itemsize
+    fields = [PointField(name=n, offset=i*itemsize, datatype=ros_dtype, count=1) for i, n in enumerate('xyzrgb')]
+    nbytes = 6
+    xyzrgb = np.array(np.hstack([pointcloud, color/255]), dtype=np.float32)
+    pc2_msg = PointCloud2(header=header, 
+                      height = 1, 
+                      width= pointcloud.shape[0], 
+                      fields=fields, 
+                      is_dense= False, 
+                      is_bigedian=False, 
+                      point_step=(itemsize * nbytes), 
+                      row_step = (itemsize * nbytes * pointcloud.shape[0]), 
+                      data=xyzrgb.tobytes())
+    return pc2_msg
 
 def project_depth_to_pc_torch(depth : torch.Tensor, color_img : torch.Tensor, calib_matrix, frame_id, stamp, mask = None, min_depth = 0.2, max_depth = 10.0, depth_factor=1.0):
     """
@@ -176,8 +201,8 @@ class ObjectDetector(Node):
             self.camera_info_available = True
         
         ### tf2
-        #self.tf_buffer = Buffer()
-        #self.tf_listener = TransformListener(self.tf_buffer, self)
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
 
         ### ROS2 subscribers
         self.img_sub = message_filters.Subscriber(self, Image, img_topic)
@@ -187,6 +212,8 @@ class ObjectDetector(Node):
         # Publishers
         self.object_pointcloud_pub = self.create_publisher(PointCloud2, self.object_pointcloud_topic, 10)
         self.full_pointcloud_pub = self.create_publisher(PointCloud2, self.full_pointcloud_topic, 10)
+        self.ransac_plane_pub = self.create_publisher(PointCloud2, "/ransac_plane", 10)
+        self.marker_pub = self.create_publisher(MarkerArray, '/plane_markers', 10)
 
         # DINO model
         self.dino_model = load_model("/home/user1/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py", "/home/user1/GroundingDINO/weights/groundingdino_swint_ogc.pth")
@@ -203,7 +230,7 @@ class ObjectDetector(Node):
 
 
     def camera_callback(self, img_msg : Image, depth_msg : Image):
-
+        start = time.time()
         # Convert ROS Image message to NumPy array (raw byte data) and then to Tensor
         rgb = np.frombuffer(img_msg.data, dtype=np.uint8).reshape(img_msg.height, img_msg.width, 3)
         rgb_torch = torch.tensor(rgb, device=self.device)
@@ -242,7 +269,6 @@ class ObjectDetector(Node):
             yolo_debug_img_msg = numpy_to_ros2_image(yolo_annotated_bgr, img_msg.header.stamp, img_msg.header.frame_id)
             self.annotated_yolo_pub.publish(yolo_debug_img_msg)
 
-
         # If found something:
         if len(logits) > 0:
             # Find bbox with higher score
@@ -269,6 +295,134 @@ class ObjectDetector(Node):
             pc_msg, full_pc_msg = project_depth_to_pc_torch(depth_torch, rgb_torch, self.calib_mat, self.camera_reference_frame, depth_msg.header.stamp, mask=mask, max_depth=3.0)
             self.object_pointcloud_pub.publish(pc_msg)
             self.full_pointcloud_pub.publish(full_pc_msg)
+            time_1 = time.time()
+            self.get_logger().info(f"DINO + SAM2 time: {time_1 - start}")
+            # Transform to base frame
+            try:
+                tf = self.tf_buffer.lookup_transform(self.robot_base_frame, "realsense_compensated", img_msg.header.stamp)
+                full_pc_transformed = tf2_sensor_msgs.do_transform_cloud(full_pc_msg, tf)
+                full_points = np.array([
+                    [p[0], p[1], p[2]]
+                    for p in point_cloud2.read_points(full_pc_transformed, field_names=("x", "y", "z"), skip_nans=True)
+                    ], dtype=np.float32)
+                if len(full_points) == 0:
+                    self.get_logger().warn("Empty full point cloud received.")
+                    return
+                obj_pc_transformed = tf2_sensor_msgs.do_transform_cloud(pc_msg, tf)
+                obj_points = np.array([
+                    [p[0], p[1], p[2]]
+                    for p in point_cloud2.read_points(obj_pc_transformed, field_names=("x", "y", "z"), skip_nans=True)
+                    ], dtype=np.float32)
+                if len(obj_points) == 0:
+                    self.get_logger().warn("Empty object point cloud received.")
+                    return
+            except Exception as ex:
+                self.get_logger().warn(f"Couldn't transform: {ex=}")
+                return
+
+            # Filter based on the object height
+            obj_height = obj_points[:, 2].min()
+            height_mask = (full_points[:, 2] > obj_height - 0.2) & (full_points[:, 2] <= obj_height + 0.05)
+            filtered_points = full_points[height_mask]
+            if len(filtered_points) == 0:
+                self.get_logger().warn("No pc points in height range.")
+                return
+            
+            # RANSAC
+            cloud_filtered = o3d.geometry.PointCloud()
+            cloud_filtered.points = o3d.utility.Vector3dVector(filtered_points)
+            plane_model, inliers = cloud_filtered.segment_plane(
+                                    distance_threshold=0.05,
+                                    ransac_n=3,
+                                    num_iterations=1000
+                                    )
+            if len(inliers) == 0:
+                self.get_logger().error("No plane detected.")
+                return
+            plane_cloud = cloud_filtered.select_by_index(inliers)
+            plane_points_np = np.asarray(plane_cloud.points)
+            time_2 = time.time()
+            self.get_logger().info(f"RANSAC time: {time_2 - time_1}")
+            # Convert plane to ros2 msg
+            plane_points_color = np.zeros_like(plane_points_np,dtype=np.uint16)
+            plane_points_color[:, -1] = 1
+            header = Header()
+            header.frame_id = full_pc_transformed.header.frame_id
+            header.stamp = img_msg.header.stamp
+            plane_msg = numpy_to_pc2_msg(plane_points_np, plane_points_color, header)
+            self.ransac_plane_pub.publish(plane_msg)
+
+            # Cluster the plane
+            labels = np.array(plane_cloud.cluster_dbscan(eps=0.05, min_points=40, print_progress=False))
+            if len(labels) == 0:
+                self.get_logger().info("No clusters found.")
+                return
+            self.get_logger().info(f"Detected {labels.max() + 1} clusters on plane.")
+            # Object Position
+            object_pos = np.array([obj_points[:,0].mean(),
+                                   obj_points[:,1].mean(),
+                                   obj_points[:,2].mean()
+                          ])
+            
+            ## Find the closest cluster to the object
+            iter = 0
+            closest_cluster = None
+            for cluster_id in range(labels.max() + 1):
+                cluster_mask = labels == cluster_id
+                cluster_points = plane_points_np[cluster_mask]
+                poly = Polygon(cluster_points[:,:2])
+                dist = poly.distance(Point_Shapely(object_pos[:2]))
+                print(f"{dist=}")
+                if iter == 0:
+                    min_dist = dist
+                    iter+=1
+                    closest_cluster = cluster_points
+                    continue
+                iter+=1
+                if dist < min_dist:
+                    closest_cluster = cluster_points
+                    min_dist = dist
+            if closest_cluster is None:
+                print("No closest cluster found")
+                return
+            time_3 = time.time()
+            self.get_logger().info(f"Clusters time: {time_3 - time_2}")
+
+            # Concave hull
+            try:
+                closest_cluster_pcd = o3d.geometry.PointCloud()
+                closest_cluster_pcd.points = o3d.utility.Vector3dVector(closest_cluster)
+                #hull_mesh, _ = closest_cluster_pcd.compute_convex_hull()
+                hull_mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_alpha_shape(
+                    closest_cluster_pcd, 0.1
+                )
+                hull_points = np.asarray(hull_mesh.vertices)
+                self.get_logger().info(f"Concave hull vertices: {len(hull_points)}")
+            except Exception as e:
+                self.get_logger().warn(f"Concave hull computation failed: {e}")
+                return
+            time_4 = time.time()
+            self.get_logger().info(f"Convex Hull: {time_4 - time_3}")
+            # Publish hull verticies
+            marker_array = MarkerArray()
+            marker = Marker()
+            marker.header = header
+            marker.type = Marker.LINE_STRIP
+            marker.action = Marker.ADD
+            marker.scale.x = 0.01
+            marker.color.r = 1.0
+            marker.color.g = 0.7
+            marker.color.a = 1.0
+            #hull_points_2d = hull_points[:,:1]
+            #hull_points_2d = np.unique(hull_points_2d)
+            for p in hull_points:
+                pt = Point()
+                pt.x, pt.y, pt.z = p.tolist()
+                marker.points.append(pt)
+            marker_array.markers.append(marker)
+            self.marker_pub.publish(marker_array)
+            time_5 = time.time()
+            self.get_logger().info(f"Final: {time_5 - start}")
 
     def camera_info_callback(self, msg : CameraInfo):
         """
