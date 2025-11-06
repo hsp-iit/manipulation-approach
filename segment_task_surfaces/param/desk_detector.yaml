@@ -1,5 +1,0 @@
-desk_detector:
-  ros__parameters:
-    min_desk_height: 0.7
-    max_desk_height: 1.5
-    compensated_pointcloud_topic: "/full_pointcloud"

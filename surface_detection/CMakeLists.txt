@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.8)
-project(segment_task_surfaces)
+project(surface_detection)
+set (CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
@@ -18,6 +21,7 @@ find_package(visualization_msgs REQUIRED)
 find_package(pcl_ros REQUIRED)
 find_package(tf2_sensor_msgs REQUIRED)
 find_package(tf2_eigen REQUIRED)
+find_package(surface_detector_interfaces REQUIRED)
 include_directories(${PCL_INCLUDE_DIRS})
 link_directories(${PCL_LIBRARY_DIRS})
 add_definitions(${PCL_DEFINITIONS})
@@ -36,9 +40,8 @@ if(BUILD_TESTING)
 endif()
 
 
-
-add_executable(desk_detector src/segment_closest_desk.cpp)
-ament_target_dependencies(desk_detector
+add_executable(surface_detector src/surface_detector.cpp)
+ament_target_dependencies(surface_detector
   "rclcpp"
   "rclcpp_lifecycle"
   "tf2_ros"
@@ -50,8 +53,9 @@ ament_target_dependencies(desk_detector
   "geometry_msgs"
   "pcl_ros"
   "tf2_eigen"
+  "surface_detector_interfaces"
 )
-target_link_libraries(desk_detector ${PCL_LIBRARIES})
+target_link_libraries(surface_detector ${PCL_LIBRARIES})
 
 install(DIRECTORY
   launch
@@ -68,7 +72,7 @@ install(DIRECTORY include/
 )
 
 install(TARGETS
-  desk_detector
+  surface_detector
   DESTINATION lib/${PROJECT_NAME})
 
 

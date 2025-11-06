@@ -29,6 +29,7 @@ from sensor_msgs_py import point_cloud2
 from scipy.spatial import cKDTree
 from shapely import Polygon
 from shapely import Point as Point_Shapely
+from surface_detector_interfaces.msg import SegmentedPointcloud
 
 TEXT_PROMPT = "bottle"
 BOX_TRESHOLD = 0.35
@@ -214,6 +215,7 @@ class ObjectDetector(Node):
         self.full_pointcloud_pub = self.create_publisher(PointCloud2, self.full_pointcloud_topic, 10)
         self.ransac_plane_pub = self.create_publisher(PointCloud2, "/ransac_plane", 10)
         self.marker_pub = self.create_publisher(MarkerArray, '/plane_markers', 10)
+        self.seg_pc_pub = self.create_publisher(SegmentedPointcloud, "/segmented_pointcloud", 10)
 
         # DINO model
         self.dino_model = load_model("/home/user1/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py", "/home/user1/GroundingDINO/weights/groundingdino_swint_ogc.pth")
@@ -230,6 +232,9 @@ class ObjectDetector(Node):
 
 
     def camera_callback(self, img_msg : Image, depth_msg : Image):
+        if not self.camera_info_available:
+            self.get_logger().warn("Waiting for camera_info topic to become available")
+            return
         start = time.time()
         # Convert ROS Image message to NumPy array (raw byte data) and then to Tensor
         rgb = np.frombuffer(img_msg.data, dtype=np.uint8).reshape(img_msg.height, img_msg.width, 3)
@@ -295,8 +300,13 @@ class ObjectDetector(Node):
             pc_msg, full_pc_msg = project_depth_to_pc_torch(depth_torch, rgb_torch, self.calib_mat, self.camera_reference_frame, depth_msg.header.stamp, mask=mask, max_depth=3.0)
             self.object_pointcloud_pub.publish(pc_msg)
             self.full_pointcloud_pub.publish(full_pc_msg)
+            seg_pc = SegmentedPointcloud()
+            seg_pc.segmented_object = pc_msg
+            seg_pc.full_pointcloud = full_pc_msg
+            self.seg_pc_pub.publish(seg_pc)
             time_1 = time.time()
             self.get_logger().info(f"DINO + SAM2 time: {time_1 - start}")
+            return
             # Transform to base frame
             try:
                 tf = self.tf_buffer.lookup_transform(self.robot_base_frame, "realsense_compensated", img_msg.header.stamp)

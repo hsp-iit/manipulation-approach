@@ -5,7 +5,8 @@
             "includePath": [
                 "${workspaceFolder}/**",
                 "/opt/ros/jazzy/**",
-                "/usr/include/**"
+                "/usr/include/**",
+                "~/ws_ros2/install/**"
 
             ],
             "defines": [],
