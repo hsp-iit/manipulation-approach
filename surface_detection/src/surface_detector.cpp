@@ -117,7 +117,7 @@ void SurfaceDetector::cloud_callback(surface_detector_interfaces::msg::Segmented
     pcl::ModelCoefficients::Ptr coefficients (new pcl::ModelCoefficients);
     pcl::PointIndices::Ptr inliers (new pcl::PointIndices);
     pcl::SACSegmentation<pcl::PointXYZ> seg;
-    seg.setOptimizeCoefficients(false);
+    seg.setOptimizeCoefficients(true);
     seg.setModelType(pcl::SACMODEL_PARALLEL_PLANE);
     seg.setAxis(Eigen::Vector3f::UnitX());  // Should be Z, but here we are in the camera frame
     seg.setEpsAngle(m_ransac_eps);  //0.087 -> 5deg
