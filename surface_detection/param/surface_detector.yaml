@@ -7,3 +7,5 @@ surface_detector:
     reference_frame: "geometric_unicycle"
     ransac_eps: 0.2
     ransac_distance_threshold: 0.02
+    thicken_ransac: true
+    delta_ransac_height: 0.03

@@ -34,6 +34,8 @@ SurfaceDetector::SurfaceDetector(const rclcpp::NodeOptions & options) : rclcpp_l
     declare_parameter("height_offset", 0.1);
     declare_parameter("ransac_eps", 0.02);
     declare_parameter("ransac_distance_threshold", 0.01);
+    declare_parameter("thicken_ransac", true);
+    declare_parameter("delta_ransac_height", 0.02);
 
     m_tf_buffer_in = std::make_unique<tf2_ros::Buffer>(this->get_clock());
     m_tf_listener = std::make_shared<tf2_ros::TransformListener>(*m_tf_buffer_in);
@@ -143,8 +145,36 @@ void SurfaceDetector::cloud_callback(surface_detector_interfaces::msg::Segmented
     pcl::toROSMsg(*plane_points, plane_cloud);
     plane_cloud.header.stamp = full_cloud.header.stamp;
     plane_cloud.header.frame_id = full_cloud.header.frame_id;
-    m_plane_pub->publish(plane_cloud);
-
+    if (!m_thicken_ransac)
+    {
+        m_plane_pub->publish(plane_cloud);
+    }
+    else
+    {
+        // Find plane avg height
+        double plane_height;
+        for (const auto& pt : *plane_points)
+        {
+            plane_height += pt.z;
+        }
+        plane_height = plane_height/plane_points->size();
+        // Filter full pc based on this height:
+        pcl::PassThrough<pcl::PointXYZ> height_pass;
+        height_pass.setInputCloud(in_cloud_pre_height_filter);
+        height_pass.setFilterFieldName("z");
+        height_pass.setFilterLimits(plane_height - m_delta_ransac_height , plane_height + m_delta_ransac_height);
+        height_pass.filter(*plane_points);
+        if (plane_points->points.size() == 0)
+        {
+            RCLCPP_ERROR_STREAM(get_logger(), "Obtained an empty pc after heigh filtering with extremes: max: " << plane_height + m_delta_ransac_height << " min: " << plane_height - m_delta_ransac_height);
+            return;
+        }
+        pcl::toROSMsg(*plane_points, plane_cloud);
+        plane_cloud.header.stamp = full_cloud.header.stamp;
+        plane_cloud.header.frame_id = full_cloud.header.frame_id;
+        m_plane_pub->publish(plane_cloud);
+    }
+    
     RCLCPP_INFO(this->get_logger(), "Clustering plane points..");
     // Create a cluster and find the one closer to the given object pc
     pcl::search::KdTree<pcl::PointXYZ>::Ptr kd_tree (new pcl::search::KdTree<pcl::PointXYZ>);
@@ -252,6 +282,8 @@ CallbackReturn SurfaceDetector::on_configure(const rclcpp_lifecycle::State &)
     m_height_offset = this->get_parameter("height_offset").as_double();
     m_ransac_eps = this->get_parameter("ransac_eps").as_double();
     m_ransac_distance_threshold = this->get_parameter("ransac_distance_threshold").as_double();
+    m_thicken_ransac = this->get_parameter("thicken_ransac").as_bool();
+    m_delta_ransac_height = this->get_parameter("delta_ransac_height").as_double();
 
 
     RCLCPP_INFO(this->get_logger(), "Configuring with: pointcloud topic: %s cluster_tolerance: %f & min_cluster_size %i ",

@@ -30,7 +30,8 @@ class SurfaceDetector : public rclcpp_lifecycle::LifecycleNode
         double m_height_offset = 0.1;
         double m_ransac_eps = 0.02;
         double m_ransac_distance_threshold = 0.01;
-
+        bool m_thicken_ransac = true;
+        double m_delta_ransac_height = 0.02;
         bool m_debug_publish = true;    // TODO implement
         // TFs
         std::shared_ptr<tf2_ros::TransformListener> m_tf_listener{nullptr};
