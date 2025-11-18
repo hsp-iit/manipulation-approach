@@ -18,22 +18,12 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from std_msgs.msg import Header
 from sensor_msgs.msg import PointCloud2, CameraInfo, Image, PointField
-from visualization_msgs.msg import Marker, MarkerArray
-from geometry_msgs.msg import Point
+from visualization_msgs.msg import MarkerArray
 from tf2_ros import TransformListener, Buffer
 import message_filters
-import open3d as o3d
-import tf2_sensor_msgs.tf2_sensor_msgs as tf2_sensor_msgs
-from ultralytics import YOLOWorld, SAM
-from sensor_msgs_py import point_cloud2
-from scipy.spatial import cKDTree
-from shapely import Polygon
-from shapely import Point as Point_Shapely
+from ultralytics import SAM
 from surface_detector_interfaces.msg import SegmentedPointcloud
-
-TEXT_PROMPT = "bottle"
-BOX_TRESHOLD = 0.35
-TEXT_TRESHOLD = 0.35    #0.25
+from surface_detector_interfaces.srv import SegmentObject
 
 def numpy_to_ros2_image(rgb: np.ndarray, stamp, frame_id="camera_rgb_frame", encoding = 'bgr8') -> Image:
     msg = Image()
@@ -166,8 +156,11 @@ class ObjectDetector(Node):
                 ('robot_base_frame','geometric_unicycle'),  # mobile_base_body_link for R1, geometric_unicycle for ergoCub
                 ('object_pointcloud_topic', 'seg_object_pointcloud'),
                 ('full_pointcloud_topic', 'full_pointcloud'),
+                ('box_threshold', 0.35),  #confidence threshold of the bbox to consider
+                ('text_threshold', 0.35) #threshold of the text
                 ])
-        self.use_yolo = False   # TODO remove
+        # if self.object_string == "" we skip the callback
+        self.object_string = ""
         # Name of the rgb image topic
         img_topic = self.get_parameter('img_topic_name').value
         # Name of the depth image topic
@@ -180,6 +173,9 @@ class ObjectDetector(Node):
         self.camera_reference_frame = self.get_parameter('camera_reference_frame').value
         # Base frame of the robot, counts as the robot pose
         self.robot_base_frame = self.get_parameter("robot_base_frame").value
+        # Dino thresholds
+        self.box_threshold = self.get_parameter("box_threshold").value
+        self.text_threshold = self.get_parameter("text_threshold").value
         # Topic names
         self.object_pointcloud_topic = self.get_parameter("object_pointcloud_topic").value
         self.full_pointcloud_topic = self.get_parameter("full_pointcloud_topic").value
@@ -211,29 +207,29 @@ class ObjectDetector(Node):
         self.tss = message_filters.ApproximateTimeSynchronizer([self.img_sub, self.depth_sub], 1, slop=0.1)   
         self.tss.registerCallback(self.camera_callback)
         # Publishers
-        self.object_pointcloud_pub = self.create_publisher(PointCloud2, self.object_pointcloud_topic, 10)
-        self.full_pointcloud_pub = self.create_publisher(PointCloud2, self.full_pointcloud_topic, 10)
-        self.ransac_plane_pub = self.create_publisher(PointCloud2, "/ransac_plane", 10)
-        self.marker_pub = self.create_publisher(MarkerArray, '/plane_markers', 10)
-        self.seg_pc_pub = self.create_publisher(SegmentedPointcloud, "/segmented_pointcloud", 10)
+        self.object_pointcloud_pub = self.create_publisher(PointCloud2, self.get_name() + "/" + self.object_pointcloud_topic, 10)
+        self.full_pointcloud_pub = self.create_publisher(PointCloud2, self.get_name() + "/" + self.full_pointcloud_topic, 10)
+        self.ransac_plane_pub = self.create_publisher(PointCloud2, self.get_name() + "/ransac_plane", 10)
+        self.marker_pub = self.create_publisher(MarkerArray, self.get_name() + '/plane_markers', 10)
+        self.seg_pc_pub = self.create_publisher(SegmentedPointcloud, self.get_name() + "/segmented_pointcloud", 10)
+        # Services
+        self.segment_object_srv = self.create_service(SegmentObject, self.get_name() + "/object_to_find", self.object_to_find)
 
         # DINO model
         self.dino_model = load_model("/home/user1/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py", "/home/user1/GroundingDINO/weights/groundingdino_swint_ogc.pth")
         # Annotated img pub (debug only)
         self.annotated_img_pub = self.create_publisher(Image, "/annotated_dino_img", 10)
-        # YOLO (TODO remove)
-        if self.use_yolo:
-            self.yolo = YOLOWorld("yolov8l-worldv2")
-            self.yolo.set_classes(["chair" , "laptop" , "mouse" , "bag" , "box" , "backpack" , "mug" , "bottle"])
-            self.annotated_yolo_pub = self.create_publisher(Image, "/annotated_yolo_img", 10)
         # SAM
         self.sam = SAM("sam2.1_l.pt")
-        self.annotated_sam_pub = self.create_publisher(Image, "/sam_mask_img", 10)
+        self.annotated_sam_pub = self.create_publisher(Image, "/sam_mask_img", 10)  # for debug
 
 
     def camera_callback(self, img_msg : Image, depth_msg : Image):
         if not self.camera_info_available:
             self.get_logger().warn("Waiting for camera_info topic to become available")
+            return
+        # Do the callback only if we have to search for an object
+        if self.object_string == "":
             return
         start = time.time()
         # Convert ROS Image message to NumPy array (raw byte data) and then to Tensor
@@ -256,23 +252,14 @@ class ObjectDetector(Node):
         boxes, logits, phrases = predict(
             model=self.dino_model,
             image=image_transformed,
-            caption=TEXT_PROMPT,
-            box_threshold=BOX_TRESHOLD,
-            text_threshold=TEXT_TRESHOLD
+            caption=self.object_string,
+            box_threshold=self.box_threshold,
+            text_threshold=self.text_threshold
         )
         # Debug pub
-        #if len(logits) > 0:
         annotated_frame = annotate(image_source=rgb, boxes=boxes, logits=logits, phrases=phrases)
         debug_img_msg = numpy_to_ros2_image(annotated_frame, img_msg.header.stamp, img_msg.header.frame_id)
         self.annotated_img_pub.publish(debug_img_msg)
-
-        # Compare with yolo (TODO remove)
-        if self.use_yolo:
-            yolo_results = self.yolo.predict(rgb)
-            yolo_annotated_rgb = yolo_results[0].plot()
-            yolo_annotated_bgr = cv2.cvtColor(yolo_annotated_rgb, cv2.COLOR_RGB2BGR)
-            yolo_debug_img_msg = numpy_to_ros2_image(yolo_annotated_bgr, img_msg.header.stamp, img_msg.header.frame_id)
-            self.annotated_yolo_pub.publish(yolo_debug_img_msg)
 
         # If found something:
         if len(logits) > 0:
@@ -307,132 +294,6 @@ class ObjectDetector(Node):
             time_1 = time.time()
             self.get_logger().info(f"DINO + SAM2 time: {time_1 - start}")
             return
-            # Transform to base frame
-            try:
-                tf = self.tf_buffer.lookup_transform(self.robot_base_frame, "realsense_compensated", img_msg.header.stamp)
-                full_pc_transformed = tf2_sensor_msgs.do_transform_cloud(full_pc_msg, tf)
-                full_points = np.array([
-                    [p[0], p[1], p[2]]
-                    for p in point_cloud2.read_points(full_pc_transformed, field_names=("x", "y", "z"), skip_nans=True)
-                    ], dtype=np.float32)
-                if len(full_points) == 0:
-                    self.get_logger().warn("Empty full point cloud received.")
-                    return
-                obj_pc_transformed = tf2_sensor_msgs.do_transform_cloud(pc_msg, tf)
-                obj_points = np.array([
-                    [p[0], p[1], p[2]]
-                    for p in point_cloud2.read_points(obj_pc_transformed, field_names=("x", "y", "z"), skip_nans=True)
-                    ], dtype=np.float32)
-                if len(obj_points) == 0:
-                    self.get_logger().warn("Empty object point cloud received.")
-                    return
-            except Exception as ex:
-                self.get_logger().warn(f"Couldn't transform: {ex=}")
-                return
-
-            # Filter based on the object height
-            obj_height = obj_points[:, 2].min()
-            height_mask = (full_points[:, 2] > obj_height - 0.2) & (full_points[:, 2] <= obj_height + 0.05)
-            filtered_points = full_points[height_mask]
-            if len(filtered_points) == 0:
-                self.get_logger().warn("No pc points in height range.")
-                return
-            
-            # RANSAC
-            cloud_filtered = o3d.geometry.PointCloud()
-            cloud_filtered.points = o3d.utility.Vector3dVector(filtered_points)
-            plane_model, inliers = cloud_filtered.segment_plane(
-                                    distance_threshold=0.05,
-                                    ransac_n=3,
-                                    num_iterations=1000
-                                    )
-            if len(inliers) == 0:
-                self.get_logger().error("No plane detected.")
-                return
-            plane_cloud = cloud_filtered.select_by_index(inliers)
-            plane_points_np = np.asarray(plane_cloud.points)
-            time_2 = time.time()
-            self.get_logger().info(f"RANSAC time: {time_2 - time_1}")
-            # Convert plane to ros2 msg
-            plane_points_color = np.zeros_like(plane_points_np,dtype=np.uint16)
-            plane_points_color[:, -1] = 1
-            header = Header()
-            header.frame_id = full_pc_transformed.header.frame_id
-            header.stamp = img_msg.header.stamp
-            plane_msg = numpy_to_pc2_msg(plane_points_np, plane_points_color, header)
-            self.ransac_plane_pub.publish(plane_msg)
-
-            # Cluster the plane
-            labels = np.array(plane_cloud.cluster_dbscan(eps=0.05, min_points=40, print_progress=False))
-            if len(labels) == 0:
-                self.get_logger().info("No clusters found.")
-                return
-            self.get_logger().info(f"Detected {labels.max() + 1} clusters on plane.")
-            # Object Position
-            object_pos = np.array([obj_points[:,0].mean(),
-                                   obj_points[:,1].mean(),
-                                   obj_points[:,2].mean()
-                          ])
-            
-            ## Find the closest cluster to the object
-            iter = 0
-            closest_cluster = None
-            for cluster_id in range(labels.max() + 1):
-                cluster_mask = labels == cluster_id
-                cluster_points = plane_points_np[cluster_mask]
-                poly = Polygon(cluster_points[:,:2])
-                dist = poly.distance(Point_Shapely(object_pos[:2]))
-                print(f"{dist=}")
-                if iter == 0:
-                    min_dist = dist
-                    iter+=1
-                    closest_cluster = cluster_points
-                    continue
-                iter+=1
-                if dist < min_dist:
-                    closest_cluster = cluster_points
-                    min_dist = dist
-            if closest_cluster is None:
-                print("No closest cluster found")
-                return
-            time_3 = time.time()
-            self.get_logger().info(f"Clusters time: {time_3 - time_2}")
-
-            # Concave hull
-            try:
-                closest_cluster_pcd = o3d.geometry.PointCloud()
-                closest_cluster_pcd.points = o3d.utility.Vector3dVector(closest_cluster)
-                #hull_mesh, _ = closest_cluster_pcd.compute_convex_hull()
-                hull_mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_alpha_shape(
-                    closest_cluster_pcd, 0.1
-                )
-                hull_points = np.asarray(hull_mesh.vertices)
-                self.get_logger().info(f"Concave hull vertices: {len(hull_points)}")
-            except Exception as e:
-                self.get_logger().warn(f"Concave hull computation failed: {e}")
-                return
-            time_4 = time.time()
-            self.get_logger().info(f"Convex Hull: {time_4 - time_3}")
-            # Publish hull verticies
-            marker_array = MarkerArray()
-            marker = Marker()
-            marker.header = header
-            marker.type = Marker.LINE_STRIP
-            marker.action = Marker.ADD
-            marker.scale.x = 0.01
-            marker.color.r = 1.0
-            marker.color.g = 0.7
-            marker.color.a = 1.0
-            #hull_points_2d = hull_points[:,:1]
-            #hull_points_2d = np.unique(hull_points_2d)
-            for p in hull_points:
-                pt = Point()
-                pt.x, pt.y, pt.z = p.tolist()
-                marker.points.append(pt)
-            marker_array.markers.append(marker)
-            self.marker_pub.publish(marker_array)
-            time_5 = time.time()
-            self.get_logger().info(f"Final: {time_5 - start}")
 
     def camera_info_callback(self, msg : CameraInfo):
         """
@@ -442,6 +303,20 @@ class ObjectDetector(Node):
             self.calib_mat = np.array(msg.k, dtype=np.float32).reshape((3, 3))
             self.camera_info_available = True
 
+    def object_to_find(self, request : SegmentObject.Request, response : SegmentObject.Response):
+        if request.object_string is not None:
+            self.object_string = request.object_string
+            response.is_ok = True
+            if self.object_string == "":
+                self.get_logger().info("[object_to_find] Received empty string. Stopping looking for objects")
+            else:
+                self.get_logger().info(f"[object_to_find] Looking for object {self.object_string=}")
+        else:
+            response.is_ok = False
+            response.error_msg = f"[object_to_find] None object received as: {request.object_string=}"
+            self.get_logger().error(response.error_msg)
+        
+        return response
 
 def main():
     rclpy.init()

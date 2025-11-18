@@ -22,6 +22,7 @@ find_package(ament_cmake REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
                             "msg/SegmentedPointcloud.msg"
+                            "srv/SegmentObject.srv"
                             DEPENDENCIES sensor_msgs 
                             LIBRARY_NAME ${PROJECT_NAME}
 )

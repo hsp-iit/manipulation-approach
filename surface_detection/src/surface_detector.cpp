@@ -76,7 +76,6 @@ void SurfaceDetector::cloud_callback(surface_detector_interfaces::msg::Segmented
         return;
     }
 
-    RCLCPP_INFO(this->get_logger(), "TF OK");
     // Convert from ros2
     pcl::fromROSMsg(full_cloud, *in_cloud_pre_height_filter);
     pcl::fromROSMsg(object_cloud, *object_pcl_cloud);
@@ -299,7 +298,7 @@ CallbackReturn SurfaceDetector::on_configure(const rclcpp_lifecycle::State &)
     //Publisher
     m_horizontal_surfaces_pub = this->create_publisher<visualization_msgs::msg::MarkerArray>("/surface_detector/horizontal_surfaces", 10);   //TODO use node name to smart naming of the topics
     m_marker_pub = this->create_publisher<visualization_msgs::msg::Marker>("/surface_detector/marker", 10);
-    m_plane_pub = this->create_publisher<sensor_msgs::msg::PointCloud2>("/detected_plane", 10);
+    m_plane_pub = this->create_publisher<sensor_msgs::msg::PointCloud2>("/surface_detector/detected_plane", 10);
 
     return CallbackReturn::SUCCESS;
 }
