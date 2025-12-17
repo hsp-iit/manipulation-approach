@@ -1,0 +1,11 @@
+surface_detector:
+  ros__parameters:
+    min_cluster_size: 100
+    cluster_tolerance: 0.02
+    height_offset: 0.2
+    pointcloud_topic: "/object_detector/segmented_pointcloud"
+    reference_frame: "geometric_unicycle"
+    ransac_eps: 0.2
+    ransac_distance_threshold: 0.02
+    thicken_ransac: true
+    delta_ransac_height: 0.03

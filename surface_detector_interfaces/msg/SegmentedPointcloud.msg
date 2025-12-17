@@ -1,0 +1,2 @@
+sensor_msgs/PointCloud2 segmented_object
+sensor_msgs/PointCloud2 full_pointcloud

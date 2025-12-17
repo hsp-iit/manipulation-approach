@@ -1,0 +1,5 @@
+string object_string
+
+---
+bool is_ok
+string error_msg
