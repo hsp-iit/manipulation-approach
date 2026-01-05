@@ -6,8 +6,8 @@
                 "${workspaceFolder}/**",
                 "/opt/ros/jazzy/**",
                 "/usr/include/**",
-                "~/ws_ros2/install/**"
-
+                "~/ws_ros2/install/**",
+                "${workspaceFolder}/approach_path_planning/include"
             ],
             "defines": [],
             "compilerPath": "/usr/bin/gcc",
