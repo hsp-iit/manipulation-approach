@@ -5,64 +5,92 @@
 
 
 using namespace approach_path_planning;
-using std::placeholders::_1;
 
 planner::planner(const rclcpp::NodeOptions & options) : 
 rclcpp_lifecycle::LifecycleNode("approach_path_planning_node", options)
 {
     // TODO declare parameters
-    _buffer = std::make_unique<tf2_ros::Buffer>(this->get_clock());
-    _tf_listener = std::make_shared<tf2_ros::TransformListener>(_buffer);
+    base_frame_ = "geometric_unicycle";
+    costmap_topic_name_ = "/global_costmap/costmap";
+    contours_topic_name_ = "/surface_detector/marker";
+    robot_radius_ = 0.4;
+    buffer_ = std::make_unique<tf2_ros::Buffer>(this->get_clock());
+    tf_listener_ = std::make_shared<tf2_ros::TransformListener>(buffer_);
+    state_ = 0;
+}
+
+void planner::costmap_update(nav2_msgs::msg::Costmap::SharedPtr msg)
+{
+    std::lock_guard<std::mutex> lock(costmap_mutex_);
+    global_costmap_ = nav2_costmap_2d::Costmap2D(msg->metadata.size_x,
+                                                msg->metadata.size_y,
+                                                msg->metadata.resolution,
+                                                msg->metadata.origin.position.x,
+                                                msg->metadata.origin.position.y);
+    unsigned char * costmap_data = global_costmap_.getCharMap();
+    // To change the data, we do a memory copy of the underlying char vector representing the cell values
+    std::memcpy(costmap_data,
+                msg->data.data(),
+                msg->data.size() * sizeof(unsigned char));
+}
+
+void planner::contours_update(visualization_msgs::msg::Marker::SharedPtr msg)
+{
+
 }
 
 CallbackReturn planner::on_configure(const rclcpp_lifecycle::State & state)
 {
     RCLCPP_INFO(get_logger(), "Configuring...");
     // TODO: get parameters
-    _robot_radius = 0.3;
-    _state = 0; // 0 standby : 1 navigating
+    robot_radius_ = 0.3;
+    state_ = 0; // 0 standby : 1 navigating
     //Action Client
-    _nav_callback_group = create_callback_group(
+    nav_callback_group_ = create_callback_group(
                             rclcpp::CallbackGroupType::MutuallyExclusive,
                             false);
-    _nav_executor.add_callback_group(_nav_callback_group, get_node_base_interface());
-    _nav_client = rclcpp_action::create_client<nav2_msgs::action::NavigateToPose>(
+    nav_executor_.add_callback_group(nav_callback_group_, get_node_base_interface());
+    nav_client_ = rclcpp_action::create_client<nav2_msgs::action::NavigateToPose>(
                             get_node_base_interface(),
                             get_node_graph_interface(),
                             get_node_logging_interface(),
                             get_node_waitables_interface(),
-                            "navigate_to_pose", _nav_callback_group);
+                            "navigate_to_pose", nav_callback_group_);
 
-    _nav_feedback_sub = this->create_subscription<nav2_msgs::action::NavigateToPose::Impl::FeedbackMessage>(
+    nav_feedback_sub_ = this->create_subscription<nav2_msgs::action::NavigateToPose::Impl::FeedbackMessage>(
                 "navigate_to_pose/_action/feedback",
                 rclcpp::SystemDefaultsQoS(),
                 // Write lambda function to what to do with the feedback
                 [this](const nav2_msgs::action::NavigateToPose::Impl::FeedbackMessage::SharedPtr msg) {   
                     RCLCPP_INFO( this->get_logger(), "Remaining distance from action feedback: %f", msg->feedback.distance_remaining);
                     {
-                        if (_nav_goal_handle!=nullptr)
+                        if (nav_goal_handle_!=nullptr)
                         {
-                            RCLCPP_INFO(_client_node->get_logger(), "FEEDBACK status: %i", _nav_goal_handle->get_status());
+                            RCLCPP_INFO(client_node_->get_logger(), "FEEDBACK status: %i", nav_goal_handle_->get_status());
                         }
                     }
                 });
-    _nav_result_sub = this->create_subscription<action_msgs::msg::GoalStatusArray>(
+    nav_result_sub_ = this->create_subscription<action_msgs::msg::GoalStatusArray>(
                 "navigate_to_pose/_action/status",
                 rclcpp::SystemDefaultsQoS(),
                 [this](const action_msgs::msg::GoalStatusArray::SharedPtr msg) {   
                     // TODO write logic on completion???
                     RCLCPP_INFO( this->get_logger(), "GOAL STATUS: %i", msg->status_list.back().status);
                 });
-    _client_node = std::make_shared<rclcpp::Node>("nav_action_client_node_planning_approach");
+    client_node_ = std::make_shared<rclcpp::Node>("nav_action_client_node_planning_approach");
 
     // Subs
-    _costmap_sub = this->create_subscription<nav2_msgs::msg::Costmap>("/local_costmap",
+    costmap_sub_ = this->create_subscription<nav2_msgs::msg::Costmap>(costmap_topic_name_,
+                                            rclcpp::SensorDataQoS(),
+                                            [this](nav2_msgs::msg::Costmap::SharedPtr msg){
+                                                costmap_update(msg);
+                                            });
+    contours_sub_ = this->create_subscription<visualization_msgs::msg::Marker>(contours_topic_name_,
                                             10,
-                                            std::bind(planner::costmap_update, this, _1));
-    _contours_sub = this->create_subscription<visualization_msgs::msg::Marker>("/surface_detector/marker",
-                                            10,
-                                            std::bind(planner::contours_update, this, _1));
-                                            
+                                            [this](visualization_msgs::msg::Marker::SharedPtr msg){
+                                                contours_update(msg);
+                                            });
+    
     return CallbackReturn::SUCCESS;
 }
 
@@ -92,7 +120,7 @@ CallbackReturn planner::on_shutdown(const rclcpp_lifecycle::State & state)
 
 CallbackReturn planner::on_cleanup(const rclcpp_lifecycle::State & state)
 {
-    _nav_client.reset();
+    nav_client_.reset();
     RCLCPP_INFO(get_logger(), "Cleanup");
     return CallbackReturn::SUCCESS;
 }

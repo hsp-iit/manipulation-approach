@@ -9,7 +9,8 @@
 #include "visualization_msgs/msg/marker.hpp"
 #include "nav2_msgs/action/navigate_to_pose.hpp"
 #include "rclcpp_action/rclcpp_action.hpp"
-
+#include "nav2_costmap_2d/costmap_2d.hpp"
+#include <mutex>
 using CallbackReturn = rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn;
 using namespace std::chrono_literals;
 
@@ -19,35 +20,37 @@ class planner : public rclcpp_lifecycle::LifecycleNode
 {
 private:
     // ------------ Params
-    std::string _base_frame;
-    std::string _costmap_topic_name;
+    std::string base_frame_;
+    std::string costmap_topic_name_;
+    std::string contours_topic_name_;
     //TODO change in enum
-    int _state;
+    int state_;
     // TODO subscribe to robot footprint for extracting this param:
-    double _robot_radius;
+    double robot_radius_;
 
     // ------------ Action client vars:
-    rclcpp_action::Client<nav2_msgs::action::NavigateToPose>::SharedPtr _nav_client;
-    rclcpp::CallbackGroup::SharedPtr _nav_callback_group;
-    rclcpp::executors::SingleThreadedExecutor _nav_executor;
+    rclcpp_action::Client<nav2_msgs::action::NavigateToPose>::SharedPtr nav_client_;
+    rclcpp::CallbackGroup::SharedPtr nav_callback_group_;
+    rclcpp::executors::SingleThreadedExecutor nav_executor_;
     std::shared_future<rclcpp_action::ClientGoalHandle
-        <nav2_msgs::action::NavigateToPose>::SharedPtr> _future_goal_handle;
-    nav2_msgs::action::NavigateToPose::Goal _goal_action;
-    rclcpp_action::ClientGoalHandle<nav2_msgs::action::NavigateToPose>::SharedPtr _nav_goal_handle;
+        <nav2_msgs::action::NavigateToPose>::SharedPtr> future_goal_handle_;
+    nav2_msgs::action::NavigateToPose::Goal goal_action_;
+    rclcpp_action::ClientGoalHandle<nav2_msgs::action::NavigateToPose>::SharedPtr nav_goal_handle_;
     // Action subs
-    rclcpp::Subscription<nav2_msgs::action::NavigateToPose::Impl::FeedbackMessage>::SharedPtr _nav_feedback_sub;
-    rclcpp::Subscription<action_msgs::msg::GoalStatusArray>::SharedPtr _nav_result_sub;
+    rclcpp::Subscription<nav2_msgs::action::NavigateToPose::Impl::FeedbackMessage>::SharedPtr nav_feedback_sub_;
+    rclcpp::Subscription<action_msgs::msg::GoalStatusArray>::SharedPtr nav_result_sub_;
     // The (non-spinning) client node used to invoke the action client
-    rclcpp::Node::SharedPtr _client_node;
-    const std::chrono::milliseconds  _server_timeout = 100ms;
+    rclcpp::Node::SharedPtr client_node_;
+    const std::chrono::milliseconds  server_timeout_ = 100ms;
     // ------------ Subscribers
-    rclcpp::Subscription<nav2_msgs::msg::Costmap>::SharedPtr _costmap_sub;
-    rclcpp::Subscription<visualization_msgs::msg::Marker>::SharedPtr _contours_sub;
+    rclcpp::Subscription<nav2_msgs::msg::Costmap>::SharedPtr costmap_sub_;
+    rclcpp::Subscription<visualization_msgs::msg::Marker>::SharedPtr contours_sub_;
     // ------------ TF2
-    std::unique_ptr<tf2_ros::Buffer> _buffer;
-    std::shared_ptr<tf2_ros::TransformListener> _tf_listener{nullptr};
+    std::unique_ptr<tf2_ros::Buffer> buffer_;
+    std::shared_ptr<tf2_ros::TransformListener> tf_listener_{nullptr};
     // ------------ Memory
-    std::shared_ptr<nav2_msgs::msg::Costmap> _local_costmap;
+    nav2_costmap_2d::Costmap2D global_costmap_;
+    std::mutex costmap_mutex_;
     // ------------ Callbacks
     void costmap_update(nav2_msgs::msg::Costmap::SharedPtr msg);
     void contours_update(visualization_msgs::msg::Marker::SharedPtr mrk_msg);
