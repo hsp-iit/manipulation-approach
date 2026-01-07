@@ -1,12 +1,13 @@
 // SPDX-FileCopyrightText: 2025 Humanoid Sensing and Perception, Istituto Italiano di Tecnologia
 // SPDX-License-Identifier: BSD-3-Clause
 // Author: Simone Micheletti
-#include "rclcpp.hpp"
+#include "rclcpp/rclcpp.hpp"
 #include "rclcpp_lifecycle/lifecycle_node.hpp"
 #include "nav2_msgs/msg/costmap.hpp"
 #include "tf2_ros/transform_listener.hpp"
 #include "tf2_ros/buffer.hpp"
 #include "visualization_msgs/msg/marker.hpp"
+#include "surface_detector_interfaces/msg/detection_results.hpp"
 #include "nav2_msgs/action/navigate_to_pose.hpp"
 #include "rclcpp_action/rclcpp_action.hpp"
 #include "nav2_costmap_2d/costmap_2d.hpp"
@@ -44,7 +45,7 @@ private:
     const std::chrono::milliseconds  server_timeout_ = 100ms;
     // ------------ Subscribers
     rclcpp::Subscription<nav2_msgs::msg::Costmap>::SharedPtr costmap_sub_;
-    rclcpp::Subscription<visualization_msgs::msg::Marker>::SharedPtr contours_sub_;
+    rclcpp::Subscription<surface_detector_interfaces::msg::DetectionResults>::SharedPtr contours_sub_;
     // ------------ TF2
     std::unique_ptr<tf2_ros::Buffer> buffer_;
     std::shared_ptr<tf2_ros::TransformListener> tf_listener_{nullptr};
@@ -53,7 +54,7 @@ private:
     std::mutex costmap_mutex_;
     // ------------ Callbacks
     void costmap_update(nav2_msgs::msg::Costmap::SharedPtr msg);
-    void contours_update(visualization_msgs::msg::Marker::SharedPtr mrk_msg);
+    void contours_update(surface_detector_interfaces::msg::DetectionResults::SharedPtr mrk_msg);
 public:
     planner(const rclcpp::NodeOptions & options);
 

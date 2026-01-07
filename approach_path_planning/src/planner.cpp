@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Author: Simone Micheletti
 #include "approach_path_planning/planner.hpp"
-
+#include "sensor_msgs/msg/point_cloud2.hpp"
 
 using namespace approach_path_planning;
 
@@ -15,7 +15,7 @@ rclcpp_lifecycle::LifecycleNode("approach_path_planning_node", options)
     contours_topic_name_ = "/surface_detector/marker";
     robot_radius_ = 0.4;
     buffer_ = std::make_unique<tf2_ros::Buffer>(this->get_clock());
-    tf_listener_ = std::make_shared<tf2_ros::TransformListener>(buffer_);
+    tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*buffer_);
     state_ = 0;
 }
 
@@ -34,8 +34,12 @@ void planner::costmap_update(nav2_msgs::msg::Costmap::SharedPtr msg)
                 msg->data.size() * sizeof(unsigned char));
 }
 
-void planner::contours_update(visualization_msgs::msg::Marker::SharedPtr msg)
+void planner::contours_update(surface_detector_interfaces::msg::DetectionResults::SharedPtr mrk_msg)
 {
+    auto contours_marker = mrk_msg->surface_contours;
+    auto object_pc = mrk_msg->segmented_object;
+    // TODO add logic on how to compute the goal
+    std::lock_guard<std::mutex> lock(costmap_mutex_);   // DO we use the costmap here?
 
 }
 
@@ -85,10 +89,10 @@ CallbackReturn planner::on_configure(const rclcpp_lifecycle::State & state)
                                             [this](nav2_msgs::msg::Costmap::SharedPtr msg){
                                                 costmap_update(msg);
                                             });
-    contours_sub_ = this->create_subscription<visualization_msgs::msg::Marker>(contours_topic_name_,
+    contours_sub_ = this->create_subscription<surface_detector_interfaces::msg::DetectionResults>(contours_topic_name_,
                                             10,
-                                            [this](visualization_msgs::msg::Marker::SharedPtr msg){
-                                                contours_update(msg);
+                                            [this](surface_detector_interfaces::msg::DetectionResults::SharedPtr mrk_msg){
+                                                contours_update(mrk_msg);
                                             });
     
     return CallbackReturn::SUCCESS;

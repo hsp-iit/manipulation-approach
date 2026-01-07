@@ -1,0 +1,2 @@
+sensor_msgs/PointCloud2 segmented_object
+visualization_msgs/Marker surface_contours

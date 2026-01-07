@@ -7,9 +7,17 @@ endif()
 
 # find dependencies
 find_package(ament_cmake REQUIRED)
-# uncomment the following section in order to fill in
-# further dependencies manually.
-# find_package(<dependency> REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(rclcpp_lifecycle REQUIRED)
+find_package(nav2_msgs REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(visualization_msgs REQUIRED)
+find_package(rclcpp_action REQUIRED)
+find_package(nav2_costmap_2d REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(surface_detector_interfaces REQUIRED)
+
+include_directories(include)
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
@@ -22,5 +30,25 @@ if(BUILD_TESTING)
   set(ament_cmake_cpplint_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
 endif()
+
+add_executable(approach_planner src/planner.cpp)
+ament_target_dependencies(approach_planner
+                          "rclcpp"
+                          "rclcpp_lifecycle"
+                          "nav2_msgs"
+                          "tf2_ros"
+                          "visualization_msgs"
+                          "sensor_msgs"
+                          "nav2_costmap_2d"
+                          "surface_detector_interfaces")
+
+install(DIRECTORY include/
+  DESTINATION include/
+)
+
+install(TARGETS
+        approach_planner
+        DESTINATION lib/${PROJECT_NAME})
+
 
 ament_package()
