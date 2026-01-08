@@ -54,6 +54,7 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
     // Transform to map frame
     auto transformed_contours = contours_points;
     auto transformed_pose = object_pose;
+    geometry_msgs::msg::PointStamped robot_pose;
     try
     {
         for (size_t i = 0; i < transformed_contours.size(); i++)
@@ -61,6 +62,12 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
             transformed_contours[i] = buffer_->transform(contours_points[i], "map");
         }
         transformed_pose = buffer_->transform(object_pose, "map");
+        auto robot_tf = buffer_->lookupTransform("map", object_pose.header.frame_id, object_pose.header.stamp);
+        robot_pose.header = robot_tf.header;
+        robot_pose.point.x = robot_tf.transform.translation.x;
+        robot_pose.point.y = robot_tf.transform.translation.y;
+        robot_pose.point.z = robot_tf.transform.translation.z;
+
     }
     catch(const std::exception& e)
     {
@@ -152,12 +159,33 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
             }
         }
     }
+    // TODO: Check if, for each edge, the object is reachable and discard the ones that are not within grasp
+    // find the edges closer to the robot: (order the vector maybe by the closest ones first?)
+    std::vector<Eigen::Vector2f> ordered_approaches = approach_point_vec;
+    Eigen::Vector2f robot_pose_eigen (robot_pose.point.x, robot_pose.point.y);
+
+    std::sort(ordered_approaches.begin(), ordered_approaches.end(),
+                [&robot_pose_eigen](const Eigen::Vector2f& a, const Eigen::Vector2f& b){
+                    return (a - robot_pose_eigen).squaredNorm() < (b - robot_pose_eigen).squaredNorm();
+                });
+    // For keeping things simple: we compute points outside the contours by a fixed offset (based on the robot radius)
+    std::vector<Eigen::Vector2f> offset_poses(L);
+    for (size_t k = 0; k < L; k++)
+    {
+        Eigen::Vector2f outward_versor = - (P - ordered_approaches[k]) / (P - ordered_approaches[k]).norm();
+        offset_poses[k] = ordered_approaches[k] + outward_versor * robot_radius_;
+    }
     
     // 3) Inflate the free space near the contours, where the real costmap is free, as desired goal, 
     // in a gradient descent fashion from the closest point of the contours from the object to grasp
+    
+    // Then we will see if these points are inside a high cost area.
+    // TODO inflate the free space near the contours.
+    std::lock_guard<std::mutex> lock(costmap_mutex_);
 
-    std::lock_guard<std::mutex> lock(costmap_mutex_);   // DO we use the costmap here?
 
+    // 4) Compute goal based on costmap optimal score (of the potential field)
+    // The orientation is given by the final X, Y goal cell facing the object pose
 }
 
 CallbackReturn planner::on_configure(const rclcpp_lifecycle::State & state)
