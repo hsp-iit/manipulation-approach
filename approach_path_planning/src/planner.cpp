@@ -34,11 +34,21 @@ void planner::costmap_update(nav2_msgs::msg::Costmap::SharedPtr msg)
                 msg->data.size() * sizeof(unsigned char));
 }
 
-void planner::contours_update(surface_detector_interfaces::msg::DetectionResults::SharedPtr mrk_msg)
+void planner::contours_update(surface_detector_interfaces::msg::DetectionResults::SharedPtr result_msg)
 {
-    auto contours_marker = mrk_msg->surface_contours;
-    auto object_pc = mrk_msg->segmented_object;
-    // TODO add logic on how to compute the goal
+    auto contours_marker = result_msg->surface_contours;
+    auto object_pose = result_msg->segmented_object;
+    // Logic on how to compute the goal
+    // 1) we get the pose of the object
+    // then the height is also extracted for setting the hands position
+    // TODO send hand position coordinates
+
+    // 2) we check the position of the contours and find the hull or polygon that contains the object.
+    // Then we project it on our custom costmap as maximum rejection cost.
+    
+    // 3) Inflate the free space near the contours, where the real costmap is free, as desired goal, 
+    // in a gradient descent fashion from the closest point of the contours from the object to grasp
+
     std::lock_guard<std::mutex> lock(costmap_mutex_);   // DO we use the costmap here?
 
 }

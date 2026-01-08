@@ -10,6 +10,7 @@ project(surface_detector_interfaces)
 
 find_package(sensor_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
@@ -25,7 +26,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
                             "msg/SegmentedPointcloud.msg"
                             "msg/DetectionResults.msg"
                             "srv/SegmentObject.srv"
-                            DEPENDENCIES sensor_msgs visualization_msgs 
+                            DEPENDENCIES sensor_msgs visualization_msgs geometry_msgs 
                             LIBRARY_NAME ${PROJECT_NAME}
 )
 

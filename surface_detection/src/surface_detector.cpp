@@ -99,7 +99,13 @@ void SurfaceDetector::cloud_callback(surface_detector_interfaces::msg::Segmented
     object_centre.get(obj_center_xyz);
     object_avg_h = obj_center_xyz.z;
     RCLCPP_INFO_STREAM(this->get_logger(), "Object height values: avg Z: " << object_avg_h << " max Z: " << object_max_h << " min Z: " << object_min_h);
-
+    // Create return container for object pose
+    geometry_msgs::msg::PointStamped object_pose_msg;
+    object_pose_msg.header.frame_id = m_reference_frame;
+    object_pose_msg.header.stamp = pc_in->header.stamp;
+    object_pose_msg.point.z = object_max_h; // TODO: check whether to use max H or avg H
+    object_pose_msg.point.x = obj_center_xyz.x;
+    object_pose_msg.point.y = obj_center_xyz.y;
     // Filter height of the plane underneath the object
     pcl::PassThrough<pcl::PointXYZ> pass;
     pass.setInputCloud(in_cloud_pre_height_filter);
@@ -236,16 +242,17 @@ void SurfaceDetector::cloud_callback(surface_detector_interfaces::msg::Segmented
     concave_hull.reconstruct (*cloud_hull);
     // TODO publish only in debug
     RCLCPP_INFO_STREAM(this->get_logger(), "Publishing markers.. with number of chulls: " << cloud_hull->points.size());
-    visualization_msgs::msg::MarkerArray marker_msg = create_chull_marker(cloud_hull, full_cloud.header, 1);
-    // TODO remove
-    m_horizontal_surfaces_pub->publish(marker_msg);
-
-    return;
+    visualization_msgs::msg::Marker marker_msg = create_chull_marker(cloud_hull, full_cloud.header, 1);
+    m_marker_pub->publish(marker_msg);
+    // Publish the custom message for the planner
+    surface_detector_interfaces::msg::DetectionResults result_msg;
+    result_msg.segmented_object = object_pose_msg;
+    result_msg.surface_contours = marker_msg;
+    m_results_pub->publish(result_msg);
 }
 
-visualization_msgs::msg::MarkerArray SurfaceDetector::create_chull_marker(std::shared_ptr<pcl::PointCloud<pcl::PointXYZ>>hull_points, std_msgs::msg::Header header, int plane_id = 0)
+visualization_msgs::msg::Marker SurfaceDetector::create_chull_marker(std::shared_ptr<pcl::PointCloud<pcl::PointXYZ>>hull_points, std_msgs::msg::Header header, int plane_id = 0)
 {
-    visualization_msgs::msg::MarkerArray marker_array;
     visualization_msgs::msg::Marker hull_marker;
     hull_marker.header = header;
     hull_marker.id = plane_id;
@@ -268,8 +275,7 @@ visualization_msgs::msg::MarkerArray SurfaceDetector::create_chull_marker(std::s
     if (!hull_marker.points.empty())
         hull_marker.points.push_back(hull_marker.points.front());
     
-    m_marker_pub->publish(hull_marker);
-    return marker_array;
+    return hull_marker;
 }
 
 CallbackReturn SurfaceDetector::on_configure(const rclcpp_lifecycle::State &)
@@ -283,7 +289,7 @@ CallbackReturn SurfaceDetector::on_configure(const rclcpp_lifecycle::State &)
     m_ransac_distance_threshold = this->get_parameter("ransac_distance_threshold").as_double();
     m_thicken_ransac = this->get_parameter("thicken_ransac").as_bool();
     m_delta_ransac_height = this->get_parameter("delta_ransac_height").as_double();
-
+    m_reference_frame = this->get_parameter("reference_frame").as_string();
 
     RCLCPP_INFO(this->get_logger(), "Configuring with: pointcloud topic: %s cluster_tolerance: %f & min_cluster_size %i ",
                     m_pointcloud_topic_name.c_str(), m_cluster_tolerance, m_min_cluster_size);
@@ -296,7 +302,7 @@ CallbackReturn SurfaceDetector::on_configure(const rclcpp_lifecycle::State &)
     );
     
     //Publisher
-    m_horizontal_surfaces_pub = this->create_publisher<visualization_msgs::msg::MarkerArray>("/surface_detector/horizontal_surfaces", 10);   //TODO use node name to smart naming of the topics
+    //m_horizontal_surfaces_pub = this->create_publisher<visualization_msgs::msg::MarkerArray>("/surface_detector/horizontal_surfaces", 10);   //TODO use node name to smart naming of the topics
     m_marker_pub = this->create_publisher<visualization_msgs::msg::Marker>("/surface_detector/marker", 10);
     m_plane_pub = this->create_publisher<sensor_msgs::msg::PointCloud2>("/surface_detector/detected_plane", 10);
 
@@ -306,7 +312,7 @@ CallbackReturn SurfaceDetector::on_configure(const rclcpp_lifecycle::State &)
 CallbackReturn SurfaceDetector::on_activate(const rclcpp_lifecycle::State &)
 {
     RCLCPP_INFO(get_logger(), "Activating");
-    m_horizontal_surfaces_pub->on_activate();
+    //m_horizontal_surfaces_pub->on_activate();
     m_marker_pub->on_activate();
     m_plane_pub->on_activate();
     return CallbackReturn::SUCCESS;
@@ -315,7 +321,7 @@ CallbackReturn SurfaceDetector::on_activate(const rclcpp_lifecycle::State &)
 CallbackReturn SurfaceDetector::on_deactivate(const rclcpp_lifecycle::State &)
 {
     RCLCPP_INFO(get_logger(), "Deactivating");
-    m_horizontal_surfaces_pub->on_deactivate();
+    //m_horizontal_surfaces_pub->on_deactivate();
     m_marker_pub->on_deactivate();
     m_plane_pub->on_deactivate();
     return CallbackReturn::SUCCESS;
@@ -324,7 +330,7 @@ CallbackReturn SurfaceDetector::on_deactivate(const rclcpp_lifecycle::State &)
 CallbackReturn SurfaceDetector::on_cleanup(const rclcpp_lifecycle::State &)
 {
     RCLCPP_INFO(get_logger(), "Cleaning Up");
-    m_horizontal_surfaces_pub.reset();
+    //m_horizontal_surfaces_pub.reset();
     m_marker_pub.reset();
     m_plane_pub.reset();
     m_pc_sub.reset();

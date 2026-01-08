@@ -9,11 +9,11 @@
 #include "tf2_sensor_msgs/tf2_sensor_msgs.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
 #include "visualization_msgs/msg/marker.hpp"
-#include "visualization_msgs/msg/marker_array.hpp"
 #include <std_msgs/msg/header.hpp>
 #include <pcl/point_types.h>
 #include <pcl/point_cloud.h>
 #include "surface_detector_interfaces/msg/segmented_pointcloud.hpp"
+#include "surface_detector_interfaces/msg/detection_results.hpp"
 
 #include "rclcpp_lifecycle/lifecycle_node.hpp"
 #include "rclcpp_lifecycle/lifecycle_publisher.hpp"
@@ -38,7 +38,8 @@ class SurfaceDetector : public rclcpp_lifecycle::LifecycleNode
         std::unique_ptr<tf2_ros::Buffer> m_tf_buffer_in;
         
         // Publishers
-        rclcpp_lifecycle::LifecyclePublisher<visualization_msgs::msg::MarkerArray>::SharedPtr m_horizontal_surfaces_pub;
+        //rclcpp_lifecycle::LifecyclePublisher<visualization_msgs::msg::MarkerArray>::SharedPtr m_horizontal_surfaces_pub;
+        rclcpp_lifecycle::LifecyclePublisher<surface_detector_interfaces::msg::DetectionResults>::SharedPtr m_results_pub;
         rclcpp_lifecycle::LifecyclePublisher<visualization_msgs::msg::Marker>::SharedPtr m_marker_pub;
         rclcpp_lifecycle::LifecyclePublisher<sensor_msgs::msg::PointCloud2>::SharedPtr m_plane_pub;
         // Subscribers
@@ -48,7 +49,7 @@ class SurfaceDetector : public rclcpp_lifecycle::LifecycleNode
     public:
         SurfaceDetector(const rclcpp::NodeOptions & options);
 
-        visualization_msgs::msg::MarkerArray create_chull_marker(std::shared_ptr<pcl::PointCloud<pcl::PointXYZ>>hull_points, std_msgs::msg::Header header, int plane_id);
+        visualization_msgs::msg::Marker create_chull_marker(std::shared_ptr<pcl::PointCloud<pcl::PointXYZ>>hull_points, std_msgs::msg::Header header, int plane_id);
 
         using CallbackReturn = rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn;
         CallbackReturn on_configure(const rclcpp_lifecycle::State &);
