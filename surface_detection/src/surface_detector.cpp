@@ -247,7 +247,16 @@ void SurfaceDetector::cloud_callback(surface_detector_interfaces::msg::Segmented
     // Publish the custom message for the planner
     surface_detector_interfaces::msg::DetectionResults result_msg;
     result_msg.segmented_object = object_pose_msg;
-    result_msg.surface_contours = marker_msg;
+    std::vector<geometry_msgs::msg::PointStamped> points_array(marker_msg.points.size());
+    geometry_msgs::msg::PointStamped tmp;
+    tmp.header = marker_msg.header;
+    for (size_t i = 0; i < marker_msg.points.size(); i++)
+    {
+        tmp.point = marker_msg.points[i];
+        points_array[i] = tmp;
+    }
+    
+    result_msg.surface_contours = points_array;
     m_results_pub->publish(result_msg);
 }
 

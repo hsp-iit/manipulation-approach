@@ -11,10 +11,13 @@ find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
 find_package(nav2_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
+find_package(tf2 REQUIRED)
 find_package(visualization_msgs REQUIRED)
 find_package(rclcpp_action REQUIRED)
 find_package(nav2_costmap_2d REQUIRED)
-find_package(sensor_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(Eigen3 REQUIRED)
 find_package(surface_detector_interfaces REQUIRED)
 
 include_directories(include)
@@ -37,10 +40,14 @@ ament_target_dependencies(approach_planner
                           "rclcpp_lifecycle"
                           "nav2_msgs"
                           "tf2_ros"
+                          "tf2_geometry_msgs"
+                          "tf2"
                           "visualization_msgs"
-                          "sensor_msgs"
+                          "geometry_msgs"
                           "nav2_costmap_2d"
                           "surface_detector_interfaces")
+target_link_libraries(approach_planner
+                          Eigen3::Eigen)
 
 install(DIRECTORY include/
   DESTINATION include/

@@ -54,7 +54,7 @@ private:
     std::mutex costmap_mutex_;
     // ------------ Callbacks
     void costmap_update(nav2_msgs::msg::Costmap::SharedPtr msg);
-    void contours_update(surface_detector_interfaces::msg::DetectionResults::SharedPtr mrk_msg);
+    void contours_update(surface_detector_interfaces::msg::DetectionResults::SharedPtr msg);
 public:
     planner(const rclcpp::NodeOptions & options);
 

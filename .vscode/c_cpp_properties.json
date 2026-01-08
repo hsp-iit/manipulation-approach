@@ -6,6 +6,7 @@
                 "${workspaceFolder}/**",
                 "/opt/ros/jazzy/**",
                 "/usr/include/**",
+                "/usr/include/eigen3/**",
                 "~/ws_ros2/install/**",
                 "${workspaceFolder}/approach_path_planning/include"
             ],
