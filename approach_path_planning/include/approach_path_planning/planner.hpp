@@ -11,6 +11,7 @@
 #include "nav2_msgs/action/navigate_to_pose.hpp"
 #include "rclcpp_action/rclcpp_action.hpp"
 #include "nav2_costmap_2d/costmap_2d.hpp"
+#include "Eigen/Core"
 #include <mutex>
 using CallbackReturn = rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn;
 using namespace std::chrono_literals;
@@ -46,6 +47,10 @@ private:
     // ------------ Subscribers
     rclcpp::Subscription<nav2_msgs::msg::Costmap>::SharedPtr costmap_sub_;
     rclcpp::Subscription<surface_detector_interfaces::msg::DetectionResults>::SharedPtr contours_sub_;
+    // ------------ Publishers
+    rclcpp_lifecycle::LifecyclePublisher<visualization_msgs::msg::Marker>::SharedPtr candidate_marker_pub_;
+    rclcpp_lifecycle::LifecyclePublisher<visualization_msgs::msg::Marker>::SharedPtr filtered_candidate_marker_pub_;
+    rclcpp_lifecycle::LifecyclePublisher<geometry_msgs::msg::PoseStamped>::SharedPtr goal_pose_pub_;
     // ------------ TF2
     std::unique_ptr<tf2_ros::Buffer> buffer_;
     std::shared_ptr<tf2_ros::TransformListener> tf_listener_{nullptr};
@@ -55,6 +60,14 @@ private:
     // ------------ Callbacks
     void costmap_update(nav2_msgs::msg::Costmap::SharedPtr msg);
     void contours_update(surface_detector_interfaces::msg::DetectionResults::SharedPtr msg);
+    // ------------ Functions
+    bool findNearestFreeCell(int mx, int my, int& out_x, int& out_y, int radius);
+    bool generateMarkerMsg(std::vector<Eigen::Vector2f> poses,
+                            visualization_msgs::msg::Marker &msg_out,
+                            builtin_interfaces::msg::Time stamp,
+                            Eigen::Vector3f rgb,
+                            std::string frame_id = "map",
+                            double z_height = 0.2);
 public:
     planner(const rclcpp::NodeOptions & options);
 

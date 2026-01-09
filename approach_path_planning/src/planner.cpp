@@ -3,20 +3,19 @@
 // Author: Simone Micheletti
 #include "approach_path_planning/planner.hpp"
 #include "geometry_msgs/msg/point_stamped.hpp"
-#include "Eigen/Core"
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <tf2/transform_datatypes.h>
 
 using namespace approach_path_planning;
 
 planner::planner(const rclcpp::NodeOptions & options) : 
-rclcpp_lifecycle::LifecycleNode("approach_path_planning_node", options)
+rclcpp_lifecycle::LifecycleNode("approach_planner_node", options)
 {
     // TODO declare parameters
     base_frame_ = "geometric_unicycle";
     costmap_topic_name_ = "/global_costmap/costmap";
     contours_topic_name_ = "/surface_detector/marker";
-    robot_radius_ = 0.4;
+    robot_radius_ = 0.2;
     buffer_ = std::make_unique<tf2_ros::Buffer>(this->get_clock());
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*buffer_);
     state_ = 0;
@@ -77,7 +76,6 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
     
     // 2) we check the position of the contours and find the closest point closer the object.
     // Then we project it on our custom costmap as maximum rejection cost.
-    // TODO do we order the points as check?
 
     std::size_t L = transformed_contours.size();
     // cycle the segment of the contours to find the closest one to the centroid:
@@ -90,7 +88,6 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
     Eigen::Vector2f closest_point_to_obj;
     for (size_t i = 0; i < L; i++)
     {
-        
         // closing condition
         Eigen::Vector2f AB, A, B;
         if (i == L - 1)
@@ -98,7 +95,6 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
             A (transformed_contours[i].point.x, transformed_contours[i].point.y);
             B (transformed_contours[0].point.x, transformed_contours[0].point.y);
             AB = B - A;
-
         }
         else
         {
@@ -161,6 +157,7 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
     }
     // TODO: Check if, for each edge, the object is reachable and discard the ones that are not within grasp
     // find the edges closer to the robot: (order the vector maybe by the closest ones first?)
+    // TODO move after / remove
     std::vector<Eigen::Vector2f> ordered_approaches = approach_point_vec;
     Eigen::Vector2f robot_pose_eigen (robot_pose.point.x, robot_pose.point.y);
 
@@ -169,30 +166,172 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
                     return (a - robot_pose_eigen).squaredNorm() < (b - robot_pose_eigen).squaredNorm();
                 });
     // For keeping things simple: we compute points outside the contours by a fixed offset (based on the robot radius)
-    std::vector<Eigen::Vector2f> offset_poses(L);
+    std::vector<Eigen::Vector2f> candidate_goals(L);
     for (size_t k = 0; k < L; k++)
     {
         Eigen::Vector2f outward_versor = - (P - ordered_approaches[k]) / (P - ordered_approaches[k]).norm();
-        offset_poses[k] = ordered_approaches[k] + outward_versor * robot_radius_;
+        candidate_goals[k] = ordered_approaches[k] + outward_versor * robot_radius_;
+    }
+    // Publish these poses for debug
+    visualization_msgs::msg::Marker candidate_goals_msg;
+    if (generateMarkerMsg(candidate_goals, 
+                        candidate_goals_msg, 
+                        transformed_pose.header.stamp, 
+                        Eigen::Vector3f(1.0f, 0.0f, 0.0f) , 
+                        "map", 
+                        transformed_pose.point.z))
+    {
+        candidate_marker_pub_->publish(candidate_goals_msg);
     }
     
-    // 3) Inflate the free space near the contours, where the real costmap is free, as desired goal, 
-    // in a gradient descent fashion from the closest point of the contours from the object to grasp
     
-    // Then we will see if these points are inside a high cost area.
-    // TODO inflate the free space near the contours.
+    // 3) Inflate the free space near the contours, where the real costmap is free, based on the robot radius?
     std::lock_guard<std::mutex> lock(costmap_mutex_);
 
-
-    // 4) Compute goal based on costmap optimal score (of the potential field)
+    // 4) we will see if these points are inside a high cost area, or looking for a nearby cell, and eventually exclude them.
+    int costmap_search_radius = 2; // Since resolution is 5cm, we look in a neighbourhood of 10 cm of an occupied candidate goal.
+    std::vector<Eigen::Vector2f> filtered_goals;
+    std::vector<unsigned char> goal_cells_cost;
+    for (const auto & it : candidate_goals)
+    {
+        unsigned int grid_x, grid_y;
+        double x = it[0], y = it[1];
+        global_costmap_.worldToMap(x, y, grid_x, grid_y);
+        auto cost = global_costmap_.getCost(x, y);
+        if (cost >= 254)    //254 means lethal, 255 unknown
+        {
+            int closest_x, closest_y;
+            if (findNearestFreeCell(grid_x, grid_y, closest_x, closest_y, costmap_search_radius))
+            {
+                cost = global_costmap_.getCost(closest_x, closest_y);
+                double world_x, world_y;
+                global_costmap_.mapToWorld(closest_x, closest_y, world_x, world_y);
+                // We save the valid candidates
+                filtered_goals.push_back(Eigen::Vector2f(world_x, world_y));
+            }
+        }
+        else
+        {
+            // Save the original
+            filtered_goals.push_back(Eigen::Vector2f(x, y));
+        }
+        goal_cells_cost.push_back(cost);
+    }
+    // Check if we found at least one valid candidate
+    if (filtered_goals.size() < 1)
+    {
+        RCLCPP_WARN(get_logger(), "Unable to find valid goal candidates");
+        return;
+    }
+    // Debug publish
+    visualization_msgs::msg::Marker filtered_goal_msg;
+    if (generateMarkerMsg(filtered_goals, 
+                        filtered_goal_msg, 
+                        transformed_pose.header.stamp, 
+                        Eigen::Vector3f(1.0f, 1.0f, 0.0f), 
+                        "map", 
+                        transformed_pose.point.z))
+    {
+        filtered_candidate_marker_pub_->publish(filtered_goal_msg);
+    }
+    
+    // 5) Score each valid candidate
+    // The poses are ordered from the closest to the robot to the furthest.
+    // We need to evaluate the costmap values
+    int best_score = 254;
+    Eigen::Vector2f best_goal;
+    bool found = false;
+    for(size_t i = 0; i < filtered_goals.size(); ++i)
+    {
+        unsigned char score = goal_cells_cost[i];
+        if (score < best_score)
+        {
+            best_score = score;
+            best_goal = filtered_goals[i];
+            found = true;
+        }
+    }
+    if (!found)
+    {
+        RCLCPP_ERROR(get_logger(), "No valid goal found!");
+        return;
+    }
+    else
+    {
+        // Debug publish:
+        RCLCPP_INFO_STREAM(get_logger(), "Found goal in X: " << best_goal[0] << " Y: " << best_goal[1]);
+    }
+    
+    
+    // 6) Compute orientation (facing the object)
     // The orientation is given by the final X, Y goal cell facing the object pose
+}
+
+bool planner::findNearestFreeCell(int map_x, int map_y, int& out_x, int& out_y, int radius)
+{
+    unsigned char best_cost = 254;    //Maximum value in costmap (lethal)
+    bool found = false;
+
+    for (int dx = -radius; dx <= radius; ++dx) 
+    {
+        for (int dy = -radius; dy <= radius; ++dy) 
+        {
+            int near_x = map_x + dx;
+            int near_y = map_x + dy;
+            // Check bounds
+            if(near_x > global_costmap_.getSizeInCellsX() or near_x < 0) continue;
+            if(near_y > global_costmap_.getSizeInCellsY() or near_y < 0) continue;
+
+            unsigned char c = global_costmap_.getCost(near_x, near_y);
+            // find the minimum cost
+            if (c < best_cost) {
+              best_cost = c;
+              // return value in costmap values (int)
+              out_x = near_x;
+              out_y = near_y;
+              found = true;
+            }
+        }
+    }
+    return found;
+}
+
+bool planner::generateMarkerMsg(std::vector<Eigen::Vector2f> poses, 
+                                visualization_msgs::msg::Marker &msg_out, 
+                                builtin_interfaces::msg::Time stamp,
+                                Eigen::Vector3f rgb,
+                                std::string frame_id,
+                                double z_height)
+{
+    if (poses.size() < 1) return false;
+    
+    visualization_msgs::msg::Marker candidate_goals_msg;
+    candidate_goals_msg.header.frame_id = frame_id;
+    candidate_goals_msg.header.stamp = stamp;
+    candidate_goals_msg.action = visualization_msgs::msg::Marker::ADD;
+    candidate_goals_msg.type = visualization_msgs::msg::Marker::SPHERE;
+    candidate_goals_msg.scale.x = 0.01;
+    candidate_goals_msg.color.r = rgb[0];
+    candidate_goals_msg.color.g = rgb[1];
+    candidate_goals_msg.color.b = rgb[2];
+    candidate_goals_msg.color.a = 1.0f;
+    candidate_goals_msg.points.reserve(poses.size());
+    for (const auto & iter : poses)
+    {
+        geometry_msgs::msg::Point tmp;
+        tmp.x = iter[0];
+        tmp.y = iter[1];
+        tmp.z = z_height;
+        candidate_goals_msg.points.push_back(tmp);
+    }
+    msg_out = candidate_goals_msg;
+    return true;
 }
 
 CallbackReturn planner::on_configure(const rclcpp_lifecycle::State & state)
 {
     RCLCPP_INFO(get_logger(), "Configuring...");
     // TODO: get parameters
-    robot_radius_ = 0.3;
     state_ = 0; // 0 standby : 1 navigating
     //Action Client
     nav_callback_group_ = create_callback_group(
@@ -239,18 +378,23 @@ CallbackReturn planner::on_configure(const rclcpp_lifecycle::State & state)
                                             [this](surface_detector_interfaces::msg::DetectionResults::SharedPtr msg){
                                                 contours_update(msg);
                                             });
-    
+    // Pubs
+    candidate_marker_pub_ = this->create_publisher<visualization_msgs::msg::Marker>(std::string(this->get_name()) + "/candidate_goals_marker", 10);
+    filtered_candidate_marker_pub_ = this->create_publisher<visualization_msgs::msg::Marker>(std::string(this->get_name()) + "/filtered_candidate_marker", 10);
+    goal_pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(std::string(this->get_name()) + "/goal_pose", 10);
     return CallbackReturn::SUCCESS;
 }
 
 CallbackReturn planner::on_activate(const rclcpp_lifecycle::State & state)
 {
+    candidate_marker_pub_->on_activate();
     RCLCPP_INFO(get_logger(), "Activating");
     return CallbackReturn::SUCCESS;
 }
 
 CallbackReturn planner::on_deactivate(const rclcpp_lifecycle::State & state)
 {
+    candidate_marker_pub_->on_deactivate();
     RCLCPP_INFO(get_logger(), "Deactivating");
     return CallbackReturn::SUCCESS;
 }
@@ -270,6 +414,7 @@ CallbackReturn planner::on_shutdown(const rclcpp_lifecycle::State & state)
 CallbackReturn planner::on_cleanup(const rclcpp_lifecycle::State & state)
 {
     nav_client_.reset();
+    candidate_marker_pub_.reset();
     RCLCPP_INFO(get_logger(), "Cleanup");
     return CallbackReturn::SUCCESS;
 }
