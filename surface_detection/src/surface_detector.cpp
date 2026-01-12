@@ -314,6 +314,7 @@ CallbackReturn SurfaceDetector::on_configure(const rclcpp_lifecycle::State &)
     //m_horizontal_surfaces_pub = this->create_publisher<visualization_msgs::msg::MarkerArray>("/surface_detector/horizontal_surfaces", 10);   //TODO use node name to smart naming of the topics
     m_marker_pub = this->create_publisher<visualization_msgs::msg::Marker>("/surface_detector/marker", 10);
     m_plane_pub = this->create_publisher<sensor_msgs::msg::PointCloud2>("/surface_detector/detected_plane", 10);
+    m_results_pub = this->create_publisher<surface_detector_interfaces::msg::DetectionResults>("/surface_detector/results", 10);
 
     return CallbackReturn::SUCCESS;
 }
@@ -324,6 +325,7 @@ CallbackReturn SurfaceDetector::on_activate(const rclcpp_lifecycle::State &)
     //m_horizontal_surfaces_pub->on_activate();
     m_marker_pub->on_activate();
     m_plane_pub->on_activate();
+    m_results_pub->on_activate();
     return CallbackReturn::SUCCESS;
 }
 
@@ -333,6 +335,7 @@ CallbackReturn SurfaceDetector::on_deactivate(const rclcpp_lifecycle::State &)
     //m_horizontal_surfaces_pub->on_deactivate();
     m_marker_pub->on_deactivate();
     m_plane_pub->on_deactivate();
+    m_results_pub->on_deactivate();
     return CallbackReturn::SUCCESS;
 }
 
@@ -343,6 +346,7 @@ CallbackReturn SurfaceDetector::on_cleanup(const rclcpp_lifecycle::State &)
     m_marker_pub.reset();
     m_plane_pub.reset();
     m_pc_sub.reset();
+    m_results_pub.reset();
     return CallbackReturn::SUCCESS;
 }
 

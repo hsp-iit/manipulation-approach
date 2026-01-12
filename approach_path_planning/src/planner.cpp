@@ -14,7 +14,7 @@ rclcpp_lifecycle::LifecycleNode("approach_planner_node", options)
     // TODO declare parameters
     base_frame_ = "geometric_unicycle";
     costmap_topic_name_ = "/global_costmap/costmap";
-    contours_topic_name_ = "/surface_detector/marker";
+    contours_topic_name_ = "/surface_detector/results";
     robot_radius_ = 0.2;
     buffer_ = std::make_unique<tf2_ros::Buffer>(this->get_clock());
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*buffer_);
@@ -38,6 +38,7 @@ void planner::costmap_update(nav2_msgs::msg::Costmap::SharedPtr msg)
 
 void planner::contours_update(surface_detector_interfaces::msg::DetectionResults::SharedPtr result_msg)
 {
+    
     auto contours_points = result_msg->surface_contours;
     auto object_pose = result_msg->segmented_object;
     // TODO Finalize sanity checks

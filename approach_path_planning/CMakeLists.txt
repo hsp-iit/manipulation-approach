@@ -53,6 +53,11 @@ install(DIRECTORY include/
   DESTINATION include/
 )
 
+install(DIRECTORY
+  launch
+  DESTINATION share/${PROJECT_NAME}/
+)
+
 install(TARGETS
         approach_planner
         DESTINATION lib/${PROJECT_NAME})
