@@ -14,6 +14,8 @@
 #include <pcl/point_cloud.h>
 #include "surface_detector_interfaces/msg/segmented_pointcloud.hpp"
 #include "surface_detector_interfaces/msg/detection_results.hpp"
+#include <pcl/Vertices.h>
+
 
 #include "rclcpp_lifecycle/lifecycle_node.hpp"
 #include "rclcpp_lifecycle/lifecycle_publisher.hpp"
@@ -32,13 +34,13 @@ class SurfaceDetector : public rclcpp_lifecycle::LifecycleNode
         double m_ransac_distance_threshold = 0.01;
         bool m_thicken_ransac = true;
         double m_delta_ransac_height = 0.02;
-        bool m_debug_publish = true;    // TODO implement
+        bool m_enable_vis = true;    // TODO implement
         // TFs
         std::shared_ptr<tf2_ros::TransformListener> m_tf_listener{nullptr};
         std::unique_ptr<tf2_ros::Buffer> m_tf_buffer_in;
         
         // Publishers
-        //rclcpp_lifecycle::LifecyclePublisher<visualization_msgs::msg::MarkerArray>::SharedPtr m_horizontal_surfaces_pub;
+        rclcpp_lifecycle::LifecyclePublisher<sensor_msgs::msg::PointCloud2>::SharedPtr m_closer_cluster_pub;
         rclcpp_lifecycle::LifecyclePublisher<surface_detector_interfaces::msg::DetectionResults>::SharedPtr m_results_pub;
         rclcpp_lifecycle::LifecyclePublisher<visualization_msgs::msg::Marker>::SharedPtr m_marker_pub;
         rclcpp_lifecycle::LifecyclePublisher<sensor_msgs::msg::PointCloud2>::SharedPtr m_plane_pub;
@@ -49,7 +51,10 @@ class SurfaceDetector : public rclcpp_lifecycle::LifecycleNode
     public:
         SurfaceDetector(const rclcpp::NodeOptions & options);
 
-        visualization_msgs::msg::Marker create_chull_marker(std::shared_ptr<pcl::PointCloud<pcl::PointXYZ>>hull_points, std_msgs::msg::Header header, int plane_id);
+        visualization_msgs::msg::Marker create_chull_marker(std::shared_ptr<pcl::PointCloud<pcl::PointXYZ>>hull_points, 
+                                                            pcl::Vertices polygon, 
+                                                            std_msgs::msg::Header header, 
+                                                            int plane_id);
 
         using CallbackReturn = rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn;
         CallbackReturn on_configure(const rclcpp_lifecycle::State &);
