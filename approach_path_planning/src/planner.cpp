@@ -95,10 +95,6 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
     RCLCPP_INFO_STREAM(this->get_logger(), "ROBOT POSE x: " << P[0] << " y: " << P[1]);
     Eigen::Vector2d closest_point_to_obj;
     double area = planner::signedArea(transformed_contours);
-    if (area > 0)
-    {
-        /* code */
-    }
     
     for (size_t i = 0; i < L; i++)
     {
@@ -181,7 +177,7 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
     if (generateMarkerMsg(candidate_goals, 
                         candidate_goals_msg, 
                         transformed_pose.header.stamp, 
-                        Eigen::Vector3d(1.0, 0.0, 0.0) , 
+                        Eigen::Vector3d(0.0, 0.0, 1.0) , 
                         "map", 
                         transformed_pose.point.z))
     {
