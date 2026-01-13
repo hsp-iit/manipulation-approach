@@ -264,7 +264,7 @@ void SurfaceDetector::cloud_callback(surface_detector_interfaces::msg::Segmented
     {   // Use the whole plane instead
         concave_hull.setInputCloud(plane_points);
     }
-    concave_hull.setAlpha(0.1);    // lower alpha means a more refined and tight contour (we don't need)
+    concave_hull.setAlpha(0.2);    // lower alpha means a more refined and tight contour (we don't need)
     concave_hull.reconstruct(*cloud_hull, polygons);
     // Find the outermost polygon, we exclude the holes
     pcl::Vertices biggest_poly;

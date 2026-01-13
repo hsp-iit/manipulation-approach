@@ -56,16 +56,18 @@ private:
     std::shared_ptr<tf2_ros::TransformListener> tf_listener_{nullptr};
     // ------------ Memory
     nav2_costmap_2d::Costmap2D global_costmap_;
+    bool costmap_received_;
     std::mutex costmap_mutex_;
     // ------------ Callbacks
     void costmap_update(nav2_msgs::msg::Costmap::SharedPtr msg);
     void contours_update(surface_detector_interfaces::msg::DetectionResults::SharedPtr msg);
     // ------------ Functions
     bool findNearestFreeCell(int mx, int my, int& out_x, int& out_y, int radius);
-    bool generateMarkerMsg(std::vector<Eigen::Vector2f> poses,
+    double signedArea(const std::vector<geometry_msgs::msg::PointStamped>& poly);
+    bool generateMarkerMsg(std::vector<Eigen::Vector2d> poses,
                             visualization_msgs::msg::Marker &msg_out,
                             builtin_interfaces::msg::Time stamp,
-                            Eigen::Vector3f rgb,
+                            Eigen::Vector3d rgb,
                             std::string frame_id = "map",
                             double z_height = 0.2);
 public:
