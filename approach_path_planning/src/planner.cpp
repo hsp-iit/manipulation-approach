@@ -5,6 +5,7 @@
 #include "geometry_msgs/msg/point_stamped.hpp"
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <tf2/transform_datatypes.h>
+#include <tf2/LinearMath/Quaternion.h>
 
 using namespace approach_path_planning;
 
@@ -87,7 +88,7 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
     // we consider these points to be the optimal ones to reach for grasping the object (since it's closer)
     std::vector<Eigen::Vector2d> approach_point_vec(L);
     Eigen::Vector2d robot_pose_eigen (robot_pose.point.x, robot_pose.point.y);
-    std::vector<Eigen::Vector2d> candidate_goals(L);
+    std::vector<Eigen::Vector3d> candidate_goals(L);    // X, Y, Theta
     double min_dist;
     Eigen::Vector2d P;
     P[0] = transformed_pose.point.x;
@@ -165,8 +166,10 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
         Eigen::Vector2d normal_right( AB.y(), -AB.x());
         Eigen::Vector2d outward_normal = (area >= 0 ? normal_right : normal_left);
         // For keeping things simple: we compute points outside the contours by a fixed offset (based on the robot radius)
-        candidate_goals[i] = approach_point_vec[i] + outward_normal.normalized() * robot_radius_;
-        RCLCPP_INFO_STREAM(get_logger(), "Candidate goal " << i << " x: " << candidate_goals[i][0] << " y: " << candidate_goals[i][1]);
+        Eigen::Vector2d pose_xy = approach_point_vec[i] + outward_normal.normalized() * robot_radius_;
+        double theta = std::atan2(-outward_normal.y(), -outward_normal.x());
+        candidate_goals[i] = Eigen::Vector3d(pose_xy[0], pose_xy[1], theta);
+        //RCLCPP_INFO_STREAM(get_logger(), "Candidate goal " << i << " x: " << candidate_goals[i][0] << " y: " << candidate_goals[i][1]);
 
         RCLCPP_INFO_STREAM(get_logger(), "approach_point_vec " << i << " x: " << approach_point_vec[i][0] << " y: " << approach_point_vec[i][1]);
     }
@@ -195,19 +198,21 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
     
     // 4) we will see if these points are inside a high cost area, or looking for a nearby cell, and eventually exclude them.
     int costmap_search_radius = 2; // Since resolution is 5cm, we look in a neighbourhood of 10 cm of an occupied candidate goal.
-    std::vector<Eigen::Vector2d> filtered_goals;
+    std::vector<Eigen::Vector3d> filtered_goals;
     std::vector<unsigned char> goal_cells_cost;
-    RCLCPP_INFO_STREAM(get_logger(), "1");
+
     for (const auto & it : candidate_goals)
     {
         unsigned int grid_x, grid_y;
-        double x = it[0], y = it[1];
-        RCLCPP_INFO_STREAM(get_logger(), "before worldToMap x: " << x << " y: " << y);
-        global_costmap_.worldToMap(x, y, grid_x, grid_y);
-        RCLCPP_INFO_STREAM(get_logger(), "got cell: " << grid_x << " " << grid_y);
+        double x = it[0], y = it[1], theta = it[2];
+        RCLCPP_INFO_STREAM(get_logger(), "Candidate X " << x << " Y " << y);
+        if (!global_costmap_.worldToMap(x, y, grid_x, grid_y))
+        {
+            RCLCPP_WARN_STREAM(get_logger(), "Cell outside costmap: x: " << x << " y: " << y);
+            continue;
+        }
         auto cost = global_costmap_.getCost(grid_x, grid_y);
-        RCLCPP_INFO_STREAM(get_logger(), "Got cost " << cost);
-        if (cost >= 253)    //254 means lethal, 255 unknown, 253 inflated
+        if (cost >= 254)    //254 means lethal, 255 unknown, 253 inflated
         {
             int closest_x, closest_y;
             if (findNearestFreeCell(grid_x, grid_y, closest_x, closest_y, costmap_search_radius))
@@ -217,13 +222,14 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
                 double world_x, world_y;
                 global_costmap_.mapToWorld(closest_x, closest_y, world_x, world_y);
                 // We save the valid candidates
-                filtered_goals.push_back(Eigen::Vector2d(world_x, world_y));
+                filtered_goals.push_back(Eigen::Vector3d(world_x, world_y, theta));
+                RCLCPP_INFO_STREAM(get_logger(), "World X " << world_x << " Y " << world_y);
             }
         }
         else
         {
             // Save the original
-            filtered_goals.push_back(Eigen::Vector2d(x, y));
+            filtered_goals.push_back(Eigen::Vector3d(x, y, theta));
         }
         goal_cells_cost.push_back(cost);
     }
@@ -250,7 +256,7 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
     // The poses are ordered from the closest to the robot to the furthest.
     // We need to evaluate the costmap values
     int best_score = 254;
-    Eigen::Vector2d best_goal;
+    Eigen::Vector3d best_goal;
     bool found = false;
     for(size_t i = 0; i < filtered_goals.size(); ++i)
     {
@@ -262,6 +268,7 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
             found = true;
         }
     }
+
     if (!found)
     {
         RCLCPP_ERROR(get_logger(), "No valid goal found!");
@@ -271,10 +278,22 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
     {
         // Debug publish:
         RCLCPP_INFO_STREAM(get_logger(), "Found goal in X: " << best_goal[0] << " Y: " << best_goal[1]);
+        geometry_msgs::msg::PoseStamped goal_msg;
+        goal_msg.header.frame_id = "map";
+        goal_msg.header.stamp = filtered_goal_msg.header.stamp;
+        goal_msg.pose.position.x = best_goal[0];
+        goal_msg.pose.position.y = best_goal[1];
+        goal_msg.pose.position.z = 0.0;
+        tf2::Quaternion q;
+        q.setRPY(0.0, 0.0, best_goal[2]);
+        goal_msg.pose.orientation.x = q.x();
+        goal_msg.pose.orientation.y = q.y();
+        goal_msg.pose.orientation.z = q.z();
+        goal_msg.pose.orientation.w = q.w();
+        goal_pose_pub_->publish(goal_msg);
     }
     
-    
-    // 6) Compute orientation (facing the object)
+    // 6) Compute orientation (facing the object or perpendicular to the surface?)
     // The orientation is given by the final X, Y goal cell facing the object pose
 }
 
@@ -320,7 +339,7 @@ bool planner::findNearestFreeCell(int map_x, int map_y, int& out_x, int& out_y, 
     return found;
 }
 
-bool planner::generateMarkerMsg(std::vector<Eigen::Vector2d> poses, 
+bool planner::generateMarkerMsg(std::vector<Eigen::Vector3d> poses, 
                                 visualization_msgs::msg::Marker &msg_out, 
                                 builtin_interfaces::msg::Time stamp,
                                 Eigen::Vector3d rgb,
@@ -418,6 +437,7 @@ CallbackReturn planner::on_activate(const rclcpp_lifecycle::State & state)
 {
     candidate_marker_pub_->on_activate();
     filtered_candidate_marker_pub_->on_activate();
+    goal_pose_pub_->on_activate();
     RCLCPP_INFO(get_logger(), "Activating");
     return CallbackReturn::SUCCESS;
 }
@@ -426,6 +446,7 @@ CallbackReturn planner::on_deactivate(const rclcpp_lifecycle::State & state)
 {
     candidate_marker_pub_->on_deactivate();
     filtered_candidate_marker_pub_->on_deactivate();
+    goal_pose_pub_->on_deactivate();
     RCLCPP_INFO(get_logger(), "Deactivating");
     return CallbackReturn::SUCCESS;
 }
@@ -447,6 +468,7 @@ CallbackReturn planner::on_cleanup(const rclcpp_lifecycle::State & state)
     nav_client_.reset();
     candidate_marker_pub_.reset();
     filtered_candidate_marker_pub_.reset();
+    goal_pose_pub_.reset();
     RCLCPP_INFO(get_logger(), "Cleanup");
     return CallbackReturn::SUCCESS;
 }

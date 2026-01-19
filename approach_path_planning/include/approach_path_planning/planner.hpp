@@ -64,7 +64,7 @@ private:
     // ------------ Functions
     bool findNearestFreeCell(int mx, int my, int& out_x, int& out_y, int radius);
     double signedArea(const std::vector<geometry_msgs::msg::PointStamped>& poly);
-    bool generateMarkerMsg(std::vector<Eigen::Vector2d> poses,
+    bool generateMarkerMsg(std::vector<Eigen::Vector3d> poses,
                             visualization_msgs::msg::Marker &msg_out,
                             builtin_interfaces::msg::Time stamp,
                             Eigen::Vector3d rgb,
