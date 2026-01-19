@@ -93,7 +93,6 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
     Eigen::Vector2d P;
     P[0] = transformed_pose.point.x;
     P[1] = transformed_pose.point.y;
-    RCLCPP_INFO_STREAM(this->get_logger(), "ROBOT POSE x: " << P[0] << " y: " << P[1]);
     Eigen::Vector2d closest_point_to_obj;
     double area = planner::signedArea(transformed_contours);
     
@@ -120,10 +119,7 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
             AB[0] = B[0] - A[0];
             AB[1] = B[1] - A[1];
         }
-        RCLCPP_INFO_STREAM(get_logger(), "transformed_contours " << i << " x: " << transformed_contours[i].point.x << " y: " << transformed_contours[i].point.y);
-        RCLCPP_INFO_STREAM(get_logger(), "ABx: " << AB[0] << " ABy: " << AB[1]);
         double segment_length_sq = AB.squaredNorm();
-        RCLCPP_INFO_STREAM(get_logger(), "segment_length: " << segment_length_sq);
         // Check if A==B
         if (segment_length_sq <= 1e-12)
         {
@@ -169,9 +165,6 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
         Eigen::Vector2d pose_xy = approach_point_vec[i] + outward_normal.normalized() * robot_radius_;
         double theta = std::atan2(-outward_normal.y(), -outward_normal.x());
         candidate_goals[i] = Eigen::Vector3d(pose_xy[0], pose_xy[1], theta);
-        //RCLCPP_INFO_STREAM(get_logger(), "Candidate goal " << i << " x: " << candidate_goals[i][0] << " y: " << candidate_goals[i][1]);
-
-        RCLCPP_INFO_STREAM(get_logger(), "approach_point_vec " << i << " x: " << approach_point_vec[i][0] << " y: " << approach_point_vec[i][1]);
     }
     RCLCPP_INFO_STREAM(get_logger(), "Found possible approach points: " << approach_point_vec.size());
 
@@ -187,7 +180,6 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
         candidate_marker_pub_->publish(candidate_goals_msg);
     }
     
-    RCLCPP_INFO_STREAM(get_logger(), "Published Markers");
     // 3) Inflate the free space near the contours, where the real costmap is free, based on the robot radius?
     std::lock_guard<std::mutex> lock(costmap_mutex_);
     if (! costmap_received_)
@@ -205,25 +197,22 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
     {
         unsigned int grid_x, grid_y;
         double x = it[0], y = it[1], theta = it[2];
-        RCLCPP_INFO_STREAM(get_logger(), "Candidate X " << x << " Y " << y);
         if (!global_costmap_.worldToMap(x, y, grid_x, grid_y))
         {
             RCLCPP_WARN_STREAM(get_logger(), "Cell outside costmap: x: " << x << " y: " << y);
             continue;
         }
         auto cost = global_costmap_.getCost(grid_x, grid_y);
-        if (cost >= 254)    //254 means lethal, 255 unknown, 253 inflated
+        if (cost >= 253)    //254 means lethal, 255 unknown, 253 inflated
         {
             int closest_x, closest_y;
             if (findNearestFreeCell(grid_x, grid_y, closest_x, closest_y, costmap_search_radius))
             {
-                RCLCPP_INFO_STREAM(get_logger(), "Found nearest cell " << closest_x << " " << closest_y);
                 cost = global_costmap_.getCost(closest_x, closest_y);
                 double world_x, world_y;
                 global_costmap_.mapToWorld(closest_x, closest_y, world_x, world_y);
                 // We save the valid candidates
                 filtered_goals.push_back(Eigen::Vector3d(world_x, world_y, theta));
-                RCLCPP_INFO_STREAM(get_logger(), "World X " << world_x << " Y " << world_y);
             }
         }
         else
@@ -233,7 +222,6 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
         }
         goal_cells_cost.push_back(cost);
     }
-    RCLCPP_INFO_STREAM(get_logger(), "Filtered " << goal_cells_cost.size() << " coming from " << L);
     // Check if we found at least one valid candidate
     if (filtered_goals.size() < 1)
     {
@@ -320,7 +308,7 @@ bool planner::findNearestFreeCell(int map_x, int map_y, int& out_x, int& out_y, 
         for (int dy = -radius; dy <= radius; ++dy) 
         {
             int near_x = map_x + dx;
-            int near_y = map_x + dy;
+            int near_y = map_y + dy;
             // Check bounds
             if(near_x > global_costmap_.getSizeInCellsX() or near_x < 0) continue;
             if(near_y > global_costmap_.getSizeInCellsY() or near_y < 0) continue;
