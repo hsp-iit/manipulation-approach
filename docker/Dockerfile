@@ -66,7 +66,7 @@ ARG GIT_TOKEN
 RUN sudo apt update && sudo apt install -y python3-pip
 
 # Cuda ENV
-ENV TORCH_CUDA_ARCH_LIST="8.6"
+ENV TORCH_CUDA_ARCH_LIST="7.5;8.6"
 ENV FORCE_CUDA="1"
 
 # Grounding DINO
