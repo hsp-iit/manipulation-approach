@@ -248,6 +248,15 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
     bool found = false;
     for(size_t i = 0; i < filtered_goals.size(); ++i)
     {
+        // Filter the poses that cannot reach the object to grasp:
+        double dx = filtered_goals[i][0] - P[0];
+        double dy = filtered_goals[i][1] - P[1];
+        double dist_threshold = 0.5;
+        if (dx*dx + dy*dy > dist_threshold*dist_threshold)    // TODO parameterize
+        {
+            continue;
+        }
+        
         unsigned char score = goal_cells_cost[i];
         if (score < best_score)
         {
@@ -280,9 +289,6 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
         goal_msg.pose.orientation.w = q.w();
         goal_pose_pub_->publish(goal_msg);
     }
-    
-    // 6) Compute orientation (facing the object or perpendicular to the surface?)
-    // The orientation is given by the final X, Y goal cell facing the object pose
 }
 
 double planner::signedArea(const std::vector<geometry_msgs::msg::PointStamped>& poly)
