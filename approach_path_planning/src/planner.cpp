@@ -13,7 +13,7 @@ rclcpp_lifecycle::LifecycleNode("approach_planner_node", options)
 {
     // TODO declare parameters
     base_frame_ = "geometric_unicycle";
-    costmap_topic_name_ = "/global_costmap/costmap";
+    costmap_topic_name_ = "/costmap_raw";
     contours_topic_name_ = "/surface_detector/results";
     robot_radius_ = 0.2;
     buffer_ = std::make_unique<tf2_ros::Buffer>(this->get_clock());
@@ -207,7 +207,7 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
         RCLCPP_INFO_STREAM(get_logger(), "got cell: " << grid_x << " " << grid_y);
         auto cost = global_costmap_.getCost(grid_x, grid_y);
         RCLCPP_INFO_STREAM(get_logger(), "Got cost " << cost);
-        if (cost >= 254)    //254 means lethal, 255 unknown
+        if (cost >= 253)    //254 means lethal, 255 unknown, 253 inflated
         {
             int closest_x, closest_y;
             if (findNearestFreeCell(grid_x, grid_y, closest_x, closest_y, costmap_search_radius))
