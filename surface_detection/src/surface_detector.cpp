@@ -27,7 +27,7 @@ using namespace std::chrono_literals;
 
 SurfaceDetector::SurfaceDetector(const rclcpp::NodeOptions & options) : rclcpp_lifecycle::LifecycleNode("desk_detector_node", options)
 {
-    declare_parameter("pointcloud_topic", "/camera/depth/color/points");
+    declare_parameter("pointcloud_topic", "/object_detector/segmented_pointcloud");
     declare_parameter("reference_frame", "geometric_unicycle");
     declare_parameter("min_cluster_size", 100);
     declare_parameter("cluster_tolerance", 0.02);
