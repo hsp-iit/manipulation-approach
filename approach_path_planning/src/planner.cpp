@@ -203,6 +203,7 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
             continue;
         }
         auto cost = global_costmap_.getCost(grid_x, grid_y);
+        double dist_threshold = 0.6;    // distance threshold in meters from the robot to the object
         if (cost >= 253)    //254 means lethal, 255 unknown, 253 inflated
         {
             int closest_x, closest_y;
@@ -211,12 +212,26 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
                 cost = global_costmap_.getCost(closest_x, closest_y);
                 double world_x, world_y;
                 global_costmap_.mapToWorld(closest_x, closest_y, world_x, world_y);
+                // Filter the poses that cannot reach the object to grasp:
+                double dx = world_x - P[0];
+                double dy = world_y - P[1];
+                if (dx*dx + dy*dy > dist_threshold*dist_threshold)    // TODO parameterize
+                {
+                    continue;
+                }
                 // We save the valid candidates
                 filtered_goals.push_back(Eigen::Vector3d(world_x, world_y, theta));
             }
         }
         else
         {
+            // Filter the poses that cannot reach the object to grasp:
+            double dx = x - P[0];
+            double dy = y - P[1];
+            if (dx*dx + dy*dy > dist_threshold*dist_threshold)    // TODO parameterize
+            {
+                continue;
+            }
             // Save the original
             filtered_goals.push_back(Eigen::Vector3d(x, y, theta));
         }
@@ -246,24 +261,34 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
     int best_score = 254;
     Eigen::Vector3d best_goal;
     bool found = false;
+    double best_dist_sq = 0;
     for(size_t i = 0; i < filtered_goals.size(); ++i)
     {
-        // Filter the poses that cannot reach the object to grasp:
-        double dx = filtered_goals[i][0] - P[0];
-        double dy = filtered_goals[i][1] - P[1];
-        double dist_threshold = 0.5;
-        if (dx*dx + dy*dy > dist_threshold*dist_threshold)    // TODO parameterize
+        // Chose as best pose the one closer to the robot
+        double robot_dist_dx = filtered_goals[i][0] - robot_pose_eigen[0];
+        double robot_dist_dy = filtered_goals[i][1] - robot_pose_eigen[1];
+        double robot_dist_sq = robot_dist_dx * robot_dist_dx + robot_dist_dy * robot_dist_dy;
+        if (!found) // just for the first time
         {
-            continue;
-        }
-        
-        unsigned char score = goal_cells_cost[i];
-        if (score < best_score)
-        {
-            best_score = score;
             best_goal = filtered_goals[i];
             found = true;
+            best_dist_sq = robot_dist_sq;
         }
+        if (robot_dist_sq < best_dist_sq)
+        {
+            best_goal = filtered_goals[i];
+            found = true;
+            best_dist_sq = robot_dist_sq;
+        }
+        
+        // Ignore the cell cost?
+        //unsigned char score = goal_cells_cost[i];
+        //if (score < best_score)
+        //{
+        //    best_score = score;
+        //    best_goal = filtered_goals[i];
+        //    found = true;
+        //}
     }
 
     if (!found)
