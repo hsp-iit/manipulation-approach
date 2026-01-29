@@ -21,6 +21,7 @@ rclcpp_lifecycle::LifecycleNode("approach_planner_node", options)
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*buffer_);
     state_ = 0;
     costmap_received_ = false;
+    //planner_ = std::make_unique<theta_star::ThetaStar>();
 }
 
 void planner::costmap_update(nav2_msgs::msg::Costmap::SharedPtr msg)
@@ -41,7 +42,7 @@ void planner::costmap_update(nav2_msgs::msg::Costmap::SharedPtr msg)
 
 void planner::contours_update(surface_detector_interfaces::msg::DetectionResults::SharedPtr result_msg)
 {
-    
+    auto loop_start = this->get_clock()->now();
     auto contours_points = result_msg->surface_contours;
     auto object_pose = result_msg->segmented_object;
     // TODO Finalize sanity checks
@@ -189,10 +190,13 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
     }
     
     // 4) we will see if these points are inside a high cost area, or looking for a nearby cell, and eventually exclude them.
+    auto start = this->get_clock()->now();
     int costmap_search_radius = 2; // Since resolution is 5cm, we look in a neighbourhood of 10 cm of an occupied candidate goal.
     std::vector<Eigen::Vector3d> filtered_goals;
     std::vector<unsigned char> goal_cells_cost;
-
+    // Robot pose in grid coords
+    unsigned int r_grid_x, r_grid_y;
+    global_costmap_.worldToMap(robot_pose.point.x, robot_pose.point.y, r_grid_x, r_grid_y);
     for (const auto & it : candidate_goals)
     {
         unsigned int grid_x, grid_y;
@@ -219,6 +223,13 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
                 {
                     continue;
                 }
+                // Check if planner can reach it
+                if (!isReachable(&global_costmap_, r_grid_x, r_grid_y, closest_x, closest_y))
+                {
+                    RCLCPP_INFO(this->get_logger(), "Goal not reachable, skipping.");
+                    continue;
+                }
+                
                 // We save the valid candidates
                 filtered_goals.push_back(Eigen::Vector3d(world_x, world_y, theta));
             }
@@ -232,6 +243,12 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
             {
                 continue;
             }
+            // Check if planner can reach it
+            if (!isReachable(&global_costmap_, r_grid_x, r_grid_y, grid_x, grid_y))
+            {
+                RCLCPP_INFO(this->get_logger(), "Goal not reachable, skipping.");
+                continue;
+            }
             // Save the original
             filtered_goals.push_back(Eigen::Vector3d(x, y, theta));
         }
@@ -243,6 +260,8 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
         RCLCPP_WARN(get_logger(), "Unable to find valid goal candidates");
         return;
     }
+    auto duration = rclcpp::Duration(this->get_clock()->now() - start);
+    RCLCPP_INFO_STREAM(this->get_logger(), "Time elapsed for pose candidates eval" << duration.seconds());
     // Debug publish
     visualization_msgs::msg::Marker filtered_goal_msg;
     if (generateMarkerMsg(filtered_goals, 
@@ -250,7 +269,7 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
                         transformed_pose.header.stamp, 
                         Eigen::Vector3d(1.0, 1.0, 0.0), 
                         "map", 
-                        transformed_pose.point.z))
+                        transformed_pose.point.z - 0.2))
     {
         filtered_candidate_marker_pub_->publish(filtered_goal_msg);
     }
@@ -258,7 +277,6 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
     // 5) Score each valid candidate
     // The poses are ordered from the closest to the robot to the furthest.
     // We need to evaluate the costmap values
-    int best_score = 254;
     Eigen::Vector3d best_goal;
     bool found = false;
     double best_dist_sq = 0;
@@ -280,17 +298,9 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
             found = true;
             best_dist_sq = robot_dist_sq;
         }
-        
-        // Ignore the cell cost?
-        //unsigned char score = goal_cells_cost[i];
-        //if (score < best_score)
-        //{
-        //    best_score = score;
-        //    best_goal = filtered_goals[i];
-        //    found = true;
-        //}
     }
-
+    auto loop_duration = rclcpp::Duration(this->get_clock()->now() - loop_start);
+    RCLCPP_INFO_STREAM(this->get_logger(), "Loop duration: " << loop_duration.seconds());
     if (!found)
     {
         RCLCPP_ERROR(get_logger(), "No valid goal found!");
@@ -316,6 +326,58 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
     }
 }
 
+bool planner::isReachable(nav2_costmap_2d::Costmap2D* costmap, 
+                unsigned int start_mx, unsigned int start_my, 
+                unsigned int goal_mx, unsigned int goal_my) 
+{
+    // Check if goal is an obstacle
+    if (costmap->getCost(goal_mx, goal_my) >= 253) return false;
+
+    int width = costmap->getSizeInCellsX();
+    int height = costmap->getSizeInCellsY();
+    
+    // Keep track of visited cells to avoid infinite loops
+    // Using a 1D vector for speed (index = y * width + x)
+    std::vector<bool> visited(width * height, false);
+    std::queue<std::pair<unsigned int, unsigned int>> q;
+
+    q.push({start_mx, start_my});
+    visited[start_my * width + start_mx] = true;
+
+    // Directions for 4-connected (Up, Down, Left, Right) or 8-connected neighbors
+    int dx[] = {0, 0, 1, -1};
+    int dy[] = {1, -1, 0, 0};
+
+    while (!q.empty()) {
+        auto [cx, cy] = q.front();
+        q.pop();
+
+        // Check if we reached the goal cell
+        if (cx == goal_mx && cy == goal_my) {
+            return true;
+        }
+
+        // Explore neighbors
+        for (int i = 0; i < 4; ++i) {
+            unsigned int nx = cx + dx[i];
+            unsigned int ny = cy + dy[i];
+
+            // Boundary check
+            if (nx >= 0 && nx < (unsigned int)width && ny >= 0 && ny < (unsigned int)height) {
+                int index = ny * width + nx;
+                
+                // If not visited AND not an obstacle
+                if (!visited[index] && costmap->getCost(nx, ny) < 253) {
+                    visited[index] = true;
+                    q.push({nx, ny});
+                }
+            }
+        }
+    }
+
+    return false; // Queue empty, no path found
+}
+
 double planner::signedArea(const std::vector<geometry_msgs::msg::PointStamped>& poly)
 {
     double area = 0.0;
@@ -331,6 +393,10 @@ double planner::signedArea(const std::vector<geometry_msgs::msg::PointStamped>& 
 
 bool planner::findNearestFreeCell(int map_x, int map_y, int& out_x, int& out_y, int radius)
 {
+    // Check if costmap present
+    if (! costmap_received_)
+        return false;
+
     unsigned char best_cost = 254;    //Maximum value in costmap (lethal)
     bool found = false;
 

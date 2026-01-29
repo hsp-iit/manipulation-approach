@@ -70,6 +70,9 @@ private:
                             Eigen::Vector3d rgb,
                             std::string frame_id = "map",
                             double z_height = 0.2);
+    bool isReachable(nav2_costmap_2d::Costmap2D* costmap, 
+                     unsigned int start_mx, unsigned int start_my, 
+                     unsigned int goal_mx, unsigned int goal_my);
 public:
     planner(const rclcpp::NodeOptions & options);
 

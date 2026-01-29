@@ -76,7 +76,7 @@ void SurfaceDetector::cloud_callback(surface_detector_interfaces::msg::Segmented
         RCLCPP_WARN_STREAM(this->get_logger(), "Cannot transfor: " << m_reference_frame << " to: " << pc_in->header.frame_id);
         return;
     }
-
+    auto start = this->get_clock()->now();
     // Convert from ros2
     pcl::fromROSMsg(full_cloud, *in_cloud_pre_height_filter);
     pcl::fromROSMsg(object_cloud, *object_pcl_cloud);
@@ -335,6 +335,8 @@ void SurfaceDetector::cloud_callback(surface_detector_interfaces::msg::Segmented
     
     result_msg.surface_contours = points_array;
     m_results_pub->publish(result_msg);
+    auto duration = rclcpp::Duration(this->get_clock()->now() - start);
+    RCLCPP_INFO_STREAM(this->get_logger(), "Loop duration: " << duration.seconds());
 }
 
 visualization_msgs::msg::Marker SurfaceDetector::create_chull_marker(std::shared_ptr<pcl::PointCloud<pcl::PointXYZ>>hull_points, 
