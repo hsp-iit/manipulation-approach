@@ -16,8 +16,7 @@ import rclpy
 import time
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
-from std_msgs.msg import Header
-from sensor_msgs.msg import PointCloud2, CameraInfo, Image, PointField
+from sensor_msgs.msg import PointCloud2, CameraInfo, Image
 from visualization_msgs.msg import MarkerArray
 from tf2_ros import TransformListener, Buffer
 import message_filters
@@ -25,120 +24,7 @@ from ultralytics import SAM
 from surface_detector_interfaces.msg import SegmentedPointcloud
 from surface_detector_interfaces.srv import SegmentObject
 
-def numpy_to_ros2_image(rgb: np.ndarray, stamp, frame_id="camera_rgb_frame", encoding = 'bgr8') -> Image:
-    msg = Image()
-    msg.height = rgb.shape[0]
-    msg.width = rgb.shape[1]
-    msg.encoding = encoding
-    msg.is_bigendian = False
-    msg.step = rgb.shape[1] * 3
-    msg.data = rgb.tobytes()
-
-    msg.header = Header()
-    msg.header.stamp = stamp
-    msg.header.frame_id = frame_id
-
-    return msg
-
-def numpy_to_pc2_msg(pointcloud: np.ndarray, color: np.ndarray, header):
-    ros_dtype = PointField.FLOAT32
-    dtype = np.float32
-    itemsize = np.dtype(dtype).itemsize
-    fields = [PointField(name=n, offset=i*itemsize, datatype=ros_dtype, count=1) for i, n in enumerate('xyzrgb')]
-    nbytes = 6
-    xyzrgb = np.array(np.hstack([pointcloud, color/255]), dtype=np.float32)
-    pc2_msg = PointCloud2(header=header, 
-                      height = 1, 
-                      width= pointcloud.shape[0], 
-                      fields=fields, 
-                      is_dense= False, 
-                      is_bigedian=False, 
-                      point_step=(itemsize * nbytes), 
-                      row_step = (itemsize * nbytes * pointcloud.shape[0]), 
-                      data=xyzrgb.tobytes())
-    return pc2_msg
-
-def project_depth_to_pc_torch(depth : torch.Tensor, color_img : torch.Tensor, calib_matrix, frame_id, stamp, mask = None, min_depth = 0.2, max_depth = 10.0, depth_factor=1.0):
-    """
-    Creates the 3D pointcloud, in camera frame, from the depth and alignes RGB color for each 3D point.
-    Uses tensors to speed up the process. Uses GPU
-    
-    :param depth: matrix of shape (W , H), depth image from the camera
-    :param color_img: matrix of shape (W , H), color image image from the camera
-    :param calib_matrix: matrix of shape (3, 3) containing the intrinsic parameters of the camera in matrix form
-    :param min_depth: (float) filters out the points below this Z distance: must be positive
-    :param max_depth: (float) filters out the points above this Z distance:  must be positive
-    :param depth_factor: (float) scale factor for the depth image (it divides the depth z values)
-    :return: Pontcloud2 msg
-    """
-    fx = calib_matrix[0, 0]
-    fy = calib_matrix[1, 1]
-    cx = calib_matrix[0, 2]
-    cy = calib_matrix[1, 2]
-    #intrisics = [[fx, 0.0, cx],
-    #             [0.0, fy, cy],
-    #             [0.0, 0.0, 1.0 / depth_factor]]
-
-    # Hardcoded sanity check
-    if min_depth < 0.0:
-          min_depth = 0.2
-    if max_depth < 0.0:
-          max_depth = 6.0
-    if mask is None:
-        mask = np.ones_like(depth.shape(), dtype=np.uint8)
-    mask_torch = torch.tensor(mask, dtype=torch.uint8, device=depth.device)
-
-    # filter depth coords based on z distance
-    uu, vv = torch.where((depth > min_depth) & (depth < max_depth))
-    full_xx = (vv - cx) * depth[uu, vv] / fx
-    full_yy = (uu - cy) * depth[uu, vv] / fy
-    full_zz = depth[uu, vv] / depth_factor
-    xx = (vv - cx) * depth[uu, vv] * mask_torch[0][uu, vv] / fx
-    yy = (uu - cy) * depth[uu, vv] * mask_torch[0][uu, vv]/ fy
-    zz = depth[uu, vv] * mask_torch[0][uu, vv] / depth_factor
-    condition = (xx != 0) & (yy != 0) & (zz != 0)
-    xx = xx[condition]
-    yy = yy[condition]
-    zz = zz[condition]
-    color = color_img[uu, vv, :]
-    color_cpu = color[condition].detach().cpu().numpy()
-    full_color_cpu = color.detach().cpu().numpy()
-    pointcloud = torch.cat((xx.unsqueeze(1), yy.unsqueeze(1), zz.unsqueeze(1)), 1).detach().cpu().numpy()
-    full_pointcloud = torch.cat((full_xx.unsqueeze(1), full_yy.unsqueeze(1), full_zz.unsqueeze(1)), 1).detach().cpu().numpy()
-    #uu, vv = uu.cpu().detach().numpy(), vv.detach().cpu().numpy()
-
-    header = Header()
-    header.frame_id = frame_id
-    header.stamp = stamp
-
-    ros_dtype = PointField.FLOAT32
-    dtype = np.float32
-    itemsize = np.dtype(dtype).itemsize
-    fields = [PointField(name=n, offset=i*itemsize, datatype=ros_dtype, count=1) for i, n in enumerate('xyzrgb')]
-    nbytes = 6
-    xyzrgb = np.array(np.hstack([pointcloud, color_cpu/255]), dtype=np.float32)
-    msg = PointCloud2(header=header, 
-                      height = 1, 
-                      width= pointcloud.shape[0], 
-                      fields=fields, 
-                      is_dense= False, 
-                      is_bigedian=False, 
-                      point_step=(itemsize * nbytes), 
-                      row_step = (itemsize * nbytes * pointcloud.shape[0]), 
-                      data=xyzrgb.tobytes())
-    #
-    full_xyzrgb = np.array(np.hstack([full_pointcloud, full_color_cpu/255]), dtype=np.float32)
-    full_msg = PointCloud2(header=header, 
-                      height = 1, 
-                      width= full_pointcloud.shape[0], 
-                      fields=fields, 
-                      is_dense= False, 
-                      is_bigedian=False, 
-                      point_step=(itemsize * nbytes), 
-                      row_step = (itemsize * nbytes * full_pointcloud.shape[0]), 
-                      data=full_xyzrgb.tobytes())
-
-    return msg, full_msg
+import object_detection.utils
 
 class ObjectDetector(Node): 
     def __init__(self):
@@ -156,8 +42,8 @@ class ObjectDetector(Node):
                 ('robot_base_frame','geometric_unicycle'),  # mobile_base_body_link for R1, geometric_unicycle for ergoCub
                 ('object_pointcloud_topic', 'seg_object_pointcloud'),
                 ('full_pointcloud_topic', 'full_pointcloud'),
-                ('box_threshold', 0.35),  #confidence threshold of the bbox to consider
-                ('text_threshold', 0.35) #threshold of the text
+                ('box_threshold', 0.35),    #confidence threshold of the bbox to consider
+                ('text_threshold', 0.35)    #threshold of the text
                 ])
         # if self.object_string == "" we skip the callback
         self.object_string = ""
@@ -184,7 +70,7 @@ class ObjectDetector(Node):
         self.get_logger().info(f'Using parameters: {img_topic=}  {depth_topic=}  {use_camera_info_topic=}  {camera_info_topic=} \n'
                                f'{self.object_pointcloud_topic=}  {self.robot_base_frame=}')
 
-        # Enable camera ingo subscriber or load params
+        # Enable camera info subscriber or load params
         if use_camera_info_topic == True:
             self.camera_info_sub = self.create_subscription(
                 CameraInfo,
@@ -215,7 +101,7 @@ class ObjectDetector(Node):
         # Services
         self.segment_object_srv = self.create_service(SegmentObject, self.get_name() + "/object_to_find", self.object_to_find)
 
-        # DINO model
+        # DINO model : TODO set params for DINO configs path
         self.dino_model = load_model("/home/user1/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py", "/home/user1/GroundingDINO/weights/groundingdino_swint_ogc.pth")
         # Annotated img pub (debug only)
         self.annotated_img_pub = self.create_publisher(Image, "/annotated_dino_img", 10)
@@ -258,7 +144,9 @@ class ObjectDetector(Node):
         )
         # Debug pub
         annotated_frame = annotate(image_source=rgb, boxes=boxes, logits=logits, phrases=phrases)
-        debug_img_msg = numpy_to_ros2_image(annotated_frame, img_msg.header.stamp, img_msg.header.frame_id)
+        debug_img_msg = object_detection.utils.numpy_to_ros2_image(annotated_frame, 
+                                                                   img_msg.header.stamp, 
+                                                                   img_msg.header.frame_id)
         self.annotated_img_pub.publish(debug_img_msg)
 
         # If found something:
@@ -281,10 +169,19 @@ class ObjectDetector(Node):
             for c in range(3):
                 colored_mask[:, :, c] = mask * color_red[c]
             overlay = cv2.addWeighted(overlay, 1.0, colored_mask, 0.5, 0)
-            sam_img = numpy_to_ros2_image(overlay, img_msg.header.stamp, img_msg.header.frame_id, encoding = 'rgb8')
+            sam_img = object_detection.utils.numpy_to_ros2_image(overlay, 
+                                                                 img_msg.header.stamp, 
+                                                                 img_msg.header.frame_id, 
+                                                                 encoding = 'rgb8')
             self.annotated_sam_pub.publish(sam_img)
             # Convert to pointcloud2
-            pc_msg, full_pc_msg = project_depth_to_pc_torch(depth_torch, rgb_torch, self.calib_mat, self.camera_reference_frame, depth_msg.header.stamp, mask=mask, max_depth=3.0)
+            pc_msg, full_pc_msg = object_detection.utils.project_depth_to_pc_torch(depth_torch, 
+                                                                                   rgb_torch, 
+                                                                                   self.calib_mat, 
+                                                                                   self.camera_reference_frame, 
+                                                                                   depth_msg.header.stamp, 
+                                                                                   mask=mask, 
+                                                                                   max_depth=3.0)
             self.object_pointcloud_pub.publish(pc_msg)
             self.full_pointcloud_pub.publish(full_pc_msg)
             seg_pc = SegmentedPointcloud()
