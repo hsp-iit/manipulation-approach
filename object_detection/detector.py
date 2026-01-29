@@ -24,7 +24,7 @@ from ultralytics import SAM
 from surface_detector_interfaces.msg import SegmentedPointcloud
 from surface_detector_interfaces.srv import SegmentObject
 
-import object_detection.utils
+import utils
 
 class ObjectDetector(Node): 
     def __init__(self):
@@ -144,7 +144,7 @@ class ObjectDetector(Node):
         )
         # Debug pub
         annotated_frame = annotate(image_source=rgb, boxes=boxes, logits=logits, phrases=phrases)
-        debug_img_msg = object_detection.utils.numpy_to_ros2_image(annotated_frame, 
+        debug_img_msg = utils.numpy_to_ros2_image(annotated_frame, 
                                                                    img_msg.header.stamp, 
                                                                    img_msg.header.frame_id)
         self.annotated_img_pub.publish(debug_img_msg)
@@ -169,13 +169,13 @@ class ObjectDetector(Node):
             for c in range(3):
                 colored_mask[:, :, c] = mask * color_red[c]
             overlay = cv2.addWeighted(overlay, 1.0, colored_mask, 0.5, 0)
-            sam_img = object_detection.utils.numpy_to_ros2_image(overlay, 
+            sam_img = utils.numpy_to_ros2_image(overlay, 
                                                                  img_msg.header.stamp, 
                                                                  img_msg.header.frame_id, 
                                                                  encoding = 'rgb8')
             self.annotated_sam_pub.publish(sam_img)
             # Convert to pointcloud2
-            pc_msg, full_pc_msg = object_detection.utils.project_depth_to_pc_torch(depth_torch, 
+            pc_msg, full_pc_msg = utils.project_depth_to_pc_torch(depth_torch, 
                                                                                    rgb_torch, 
                                                                                    self.calib_mat, 
                                                                                    self.camera_reference_frame, 
