@@ -6,6 +6,7 @@
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <tf2/transform_datatypes.h>
 #include <tf2/LinearMath/Quaternion.h>
+#include <queue>
 
 using namespace approach_path_planning;
 
@@ -224,7 +225,7 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
                     continue;
                 }
                 // Check if planner can reach it
-                if (!isReachable(&global_costmap_, r_grid_x, r_grid_y, closest_x, closest_y))
+                if (!isReachableAstar(&global_costmap_, r_grid_x, r_grid_y, closest_x, closest_y))
                 {
                     RCLCPP_INFO(this->get_logger(), "Goal not reachable, skipping.");
                     continue;
@@ -244,7 +245,7 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
                 continue;
             }
             // Check if planner can reach it
-            if (!isReachable(&global_costmap_, r_grid_x, r_grid_y, grid_x, grid_y))
+            if (!isReachableAstar(&global_costmap_, r_grid_x, r_grid_y, grid_x, grid_y))
             {
                 RCLCPP_INFO(this->get_logger(), "Goal not reachable, skipping.");
                 continue;
@@ -376,6 +377,76 @@ bool planner::isReachable(nav2_costmap_2d::Costmap2D* costmap,
     }
 
     return false; // Queue empty, no path found
+}
+
+bool planner::isReachableAstar(nav2_costmap_2d::Costmap2D* costmap, 
+                               unsigned int start_mx, unsigned int start_my, 
+                               unsigned int goal_mx, unsigned int goal_my)
+{
+    // Costmap bounds
+    unsigned int width = costmap->getSizeInCellsX();
+    unsigned int height = costmap->getSizeInCellsY();
+
+    // Queue containing all the cells to evaluate for finding the start
+    // These are ordered by the smaller score first
+    std::priority_queue<Cell, std::vector<Cell>, std::greater<Cell>> q;
+    
+    Cell goal_cell;
+    goal_cell.id = goal_my * width + goal_mx;
+    goal_cell.score = std::hypot(goal_mx - start_mx, goal_my - start_my);
+    goal_cell.path_lenght = 0.0;
+    q.push(goal_cell);
+
+    const std::vector<int> dx = {0, 0, 1, -1};
+    const std::vector<int> dy = {-1, 1, 0, 0};
+    std::vector<bool> visited_ids;
+    visited_ids.resize(width * height, false);
+    visited_ids[goal_cell.id] = true;
+
+    // A* search loop
+    while (!q.empty())
+    {
+        // Latest cell
+        Cell cell = q.top();
+        q.pop(); // Remove the cell explored
+        unsigned int mx, my;
+        costmap->indexToCells(cell.id, mx, my);
+
+        // Check if reached the start
+        if (mx == start_mx && my == start_my)
+            return true;
+        
+        // Expand neighbors
+        for (size_t i = 0; i < dx.size(); i++)
+        {
+            int next_x = (int)mx + dx[i];
+            int next_y = (int)my + dy[i];
+            // Out of map bounds
+            if (next_x > width || next_x < 0 || 
+                next_y > height || next_y < 0)
+                continue;
+            int next_id = costmap->getIndex(next_x, next_y);
+            // Check if already visited
+            if(visited_ids[next_id])
+                continue;
+            unsigned int cost = costmap->getCost(next_id);
+            // Check if wall, lethal or unknown (we don't want unknown space travel)
+            if (cost >= 253)
+            {
+                // We add it to already visited to speed up computation for future checks ?
+                visited_ids[next_id] = true;
+                continue;
+            }
+            // Compute score: distance + path lenght
+            Cell next_cell;
+            next_cell.id = next_id;
+            next_cell.path_lenght = cell.path_lenght + costmap->getResolution();
+            next_cell.score = std::hypot((int)start_mx - next_x, (int)start_my - next_y) + next_cell.path_lenght;
+            q.push(next_cell);
+            visited_ids[next_id] = true;
+        }
+    }
+    return false;
 }
 
 double planner::signedArea(const std::vector<geometry_msgs::msg::PointStamped>& poly)

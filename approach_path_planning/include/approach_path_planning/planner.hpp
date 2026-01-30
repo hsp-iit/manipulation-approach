@@ -21,6 +21,17 @@ namespace approach_path_planning{
 class planner : public rclcpp_lifecycle::LifecycleNode 
 {
 private:
+    class Cell
+    {
+    public:
+        int id;
+        double score;
+        double path_lenght;
+        // We invert the direction because we want the minimum score to be on top of priority_queue
+        bool operator>(Cell a) const{
+            return this->score > a.score;;
+        };
+    };
     // ------------ Params
     std::string base_frame_;
     std::string costmap_topic_name_;
@@ -71,6 +82,9 @@ private:
                             std::string frame_id = "map",
                             double z_height = 0.2);
     bool isReachable(nav2_costmap_2d::Costmap2D* costmap, 
+                     unsigned int start_mx, unsigned int start_my, 
+                     unsigned int goal_mx, unsigned int goal_my);
+    bool isReachableAstar(nav2_costmap_2d::Costmap2D* costmap, 
                      unsigned int start_mx, unsigned int start_my, 
                      unsigned int goal_mx, unsigned int goal_my);
 public:
