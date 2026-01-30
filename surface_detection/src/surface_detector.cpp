@@ -9,16 +9,13 @@
 #include <pcl/io/pcd_io.h>
 #include <pcl/sample_consensus/method_types.h>
 #include <pcl/sample_consensus/model_types.h>
-#include <pcl/segmentation/sac_segmentation.h>
 #include <pcl/filters/passthrough.h>
-#include <pcl/filters/extract_indices.h>
 #include <pcl/surface/convex_hull.h>
 #include <pcl/common/centroid.h>
-#include <pcl/segmentation/extract_clusters.h>
 #include <tf2_eigen/tf2_eigen.hpp>
 #include <pcl/common/distances.h>
 #include <pcl/common/common.h>
-#include <pcl/filters/voxel_grid.h>
+
 
 #include <pcl/filters/project_inliers.h>
 #include <pcl/surface/concave_hull.h>
@@ -39,6 +36,7 @@ SurfaceDetector::SurfaceDetector(const rclcpp::NodeOptions & options) : rclcpp_l
     declare_parameter("thicken_ransac", true);
     declare_parameter("delta_ransac_height", 0.02);
     declare_parameter("enable_visualization", true);
+    m_kd_tree = std::make_shared<pcl::search::KdTree<pcl::PointXYZ>> ();
 
     m_tf_buffer_in = std::make_unique<tf2_ros::Buffer>(this->get_clock());
     m_tf_listener = std::make_shared<tf2_ros::TransformListener>(*m_tf_buffer_in);
@@ -103,7 +101,7 @@ void SurfaceDetector::cloud_callback(surface_detector_interfaces::msg::Segmented
     double object_avg_h = object_centre[2];
 
     RCLCPP_INFO_STREAM(this->get_logger(), "Object height values: avg Z: " << object_avg_h << " max Z: " << object_max_h << " min Z: " << object_min_h);
-    // Create return container for object pose
+    // Create return msg for object pose
     geometry_msgs::msg::PointStamped object_pose_msg;
     object_pose_msg.header.frame_id = m_reference_frame;
     object_pose_msg.header.stamp = pc_in->header.stamp;
@@ -111,41 +109,28 @@ void SurfaceDetector::cloud_callback(surface_detector_interfaces::msg::Segmented
     object_pose_msg.point.x = object_centre[0];
     object_pose_msg.point.y = object_centre[1];
     // Filter height of the plane underneath the object
-    pcl::PassThrough<pcl::PointXYZ> pass;
-    pass.setInputCloud(in_cloud_pre_height_filter);
-    pass.setFilterFieldName("z");
+    m_pass.setInputCloud(in_cloud_pre_height_filter);
     double delta = std::abs(object_max_h - object_min_h) / 2;
     double min_limit = object_avg_h - delta - m_height_offset;
     if (min_limit >= object_avg_h) {
         RCLCPP_ERROR_STREAM(this->get_logger(), "PassThrough limits inverted. min: " << min_limit << " max: " << object_avg_h);
         return;
     }
-    pass.setFilterLimits(min_limit, object_avg_h);
-    pass.filter(*in_cloud_filtered);
+    m_pass.setFilterLimits(min_limit, object_avg_h);
+    m_pass.filter(*in_cloud_filtered);
     if (in_cloud_filtered->points.size() == 0)
     {
         RCLCPP_ERROR_STREAM(get_logger(), "Obtained an empty pc after heigh filtering with extremes: max: " << object_min_h << " min: " << object_min_h - 0.2);
         return;
     }
     // Voxel grid filtering (downsampling)
-    pcl::VoxelGrid<pcl::PointXYZ> grid;
-    grid.setInputCloud(in_cloud_filtered);
-    float voxel_size = 0.02f;
-    grid.setLeafSize(voxel_size, voxel_size, voxel_size); // TODO parameterize
-    grid.filter(*in_cloud_filtered);
+    m_grid.setInputCloud(in_cloud_filtered);
+    m_grid.filter(*in_cloud_filtered);
     // RANSAC
     pcl::ModelCoefficients::Ptr coefficients (new pcl::ModelCoefficients);
     pcl::PointIndices::Ptr inliers (new pcl::PointIndices);
-    pcl::SACSegmentation<pcl::PointXYZ> seg;
-    seg.setOptimizeCoefficients(true);
-    seg.setModelType(pcl::SACMODEL_PARALLEL_PLANE);
-    seg.setAxis(Eigen::Vector3f::UnitX());  // Should be Z, but here we are in the camera frame
-    seg.setEpsAngle(m_ransac_eps);  //0.087 -> 5deg
-    seg.setMethodType(pcl::SAC_RANSAC);
-    seg.setMaxIterations(200);
-    seg.setDistanceThreshold(m_ransac_distance_threshold);
-    seg.setInputCloud(in_cloud_filtered);
-    seg.segment(*inliers, *coefficients);
+    m_seg.setInputCloud(in_cloud_filtered);
+    m_seg.segment(*inliers, *coefficients);
     if (inliers->indices.size() == 0)
     {
         RCLCPP_ERROR(get_logger(), "Could not estimate a planar model for the given cloud.");
@@ -154,12 +139,10 @@ void SurfaceDetector::cloud_callback(surface_detector_interfaces::msg::Segmented
 
     // Extract plane points
     sensor_msgs::msg::PointCloud2 plane_cloud;
-    pcl::ExtractIndices<pcl::PointXYZ> extract;
-    extract.setInputCloud(in_cloud_filtered);
-    extract.setIndices(inliers);
-    extract.setNegative(false);
     pcl::PointCloud<pcl::PointXYZ>::Ptr plane_points (new pcl::PointCloud<pcl::PointXYZ>);
-    extract.filter(*plane_points);
+    m_extract.setInputCloud(in_cloud_filtered);
+    m_extract.setIndices(inliers);
+    m_extract.filter(*plane_points);
     pcl::toROSMsg(*plane_points, plane_cloud);
     plane_cloud.header.stamp = full_cloud.header.stamp;
     plane_cloud.header.frame_id = full_cloud.header.frame_id;
@@ -175,11 +158,9 @@ void SurfaceDetector::cloud_callback(surface_detector_interfaces::msg::Segmented
     else
     {
         // Filter full pc based on avg height:
-        pcl::PassThrough<pcl::PointXYZ> height_pass;
-        height_pass.setInputCloud(in_cloud_pre_height_filter);
-        height_pass.setFilterFieldName("z");
-        height_pass.setFilterLimits(plane_height - m_delta_ransac_height , plane_height + m_delta_ransac_height);
-        height_pass.filter(*plane_points);
+        m_height_pass.setInputCloud(in_cloud_pre_height_filter);
+        m_height_pass.setFilterLimits(plane_height - m_delta_ransac_height , plane_height + m_delta_ransac_height);
+        m_height_pass.filter(*plane_points);
         if (plane_points->points.size() == 0)
         {
             RCLCPP_ERROR_STREAM(get_logger(), "Obtained an empty pc after heigh filtering with extremes: max: " << plane_height + m_delta_ransac_height << " min: " << plane_height - m_delta_ransac_height);
@@ -196,15 +177,10 @@ void SurfaceDetector::cloud_callback(surface_detector_interfaces::msg::Segmented
     
     RCLCPP_INFO(this->get_logger(), "Clustering plane points..");
     // Create a cluster and find the one closer to the given object pc
-    pcl::search::KdTree<pcl::PointXYZ>::Ptr kd_tree (new pcl::search::KdTree<pcl::PointXYZ>);
-    kd_tree->setInputCloud(plane_points);
+    m_kd_tree->setInputCloud(plane_points);
     std::vector<pcl::PointIndices> cluster_ids;
-    pcl::EuclideanClusterExtraction<pcl::PointXYZ> cluster;
-    cluster.setClusterTolerance(m_cluster_tolerance);  
-    cluster.setMinClusterSize(m_min_cluster_size);
-    cluster.setSearchMethod(kd_tree);
-    cluster.setInputCloud(plane_points);
-    cluster.extract(cluster_ids);
+    m_cluster.setInputCloud(plane_points);
+    m_cluster.extract(cluster_ids);
     //Sanity Check
     if(cluster_ids.size() <=1)
     {
@@ -272,54 +248,29 @@ void SurfaceDetector::cloud_callback(surface_detector_interfaces::msg::Segmented
     concave_hull.reconstruct(*cloud_hull, polygons);
     // Find the outermost polygon, we exclude the holes
     pcl::Vertices biggest_poly;
-    RCLCPP_INFO_STREAM(this->get_logger(), "Number of polygons: " << polygons.size());
-    if (polygons.size() > 0)
+    double max_area = -1.0;
+    if (!polygons.empty())
     {
-        // We find the poly with the biggest area
-        double max_area = .0;
-        for (const auto & it : polygons)
+        for (const auto& poly : polygons)
         {
-            RCLCPP_INFO_STREAM(this->get_logger(), "Number of verticies in poly: " << it.vertices.size());
-            // Area computation
-            double area = .0;
-            // Check if poly is degenerate
-            if(it.vertices.size() < 3) 
-                continue;
-            for (size_t i = 0; i < it.vertices.size(); ++i)
-            {   // current point
-                float x_i, x_ii, y_i, y_ii;
-                x_i = cloud_hull->points[it.vertices[i]].x;
-                y_i = cloud_hull->points[it.vertices[i]].y;
-                // next point
-                if (i == it.vertices.size() - 1)
-                {
-                    
-                    x_ii = cloud_hull->points[it.vertices[0]].x;
-                    y_ii = cloud_hull->points[it.vertices[0]].y;
-                }
-                else
-                {
-                    x_ii = cloud_hull->points[it.vertices[i+1]].x;
-                    y_ii = cloud_hull->points[it.vertices[i+1]].y;
-                }
-
-                area += (x_i * y_ii - x_ii * y_i);
-
-            }
-            area = std::abs(area) / 2;
+            double area = computePolygonArea(cloud_hull, poly);
+            
             if (area > max_area)
             {
                 max_area = area;
-                biggest_poly = it;
+                biggest_poly = poly;
             }
         }
-        RCLCPP_INFO_STREAM(this->get_logger(), "Got polygon with area: " << max_area << " and verticies: " << biggest_poly.vertices.size());
     }
-    else
+
+    if (max_area <= 0 || biggest_poly.vertices.empty())
     {
-        RCLCPP_ERROR_STREAM(this->get_logger(), "Found not enough polygons as surface contours: " << polygons.size());
+        RCLCPP_ERROR(this->get_logger(), "No valid surface contour found.");
         return;
     }
+
+    RCLCPP_INFO(this->get_logger(), "Selected biggest polygon: Area %.3f, Vertices %zu", 
+                max_area, biggest_poly.vertices.size());
     
     // TODO publish only in debug
     RCLCPP_INFO_STREAM(this->get_logger(), "Publishing markers.. with number of chulls: " << cloud_hull->points.size());
@@ -343,6 +294,26 @@ void SurfaceDetector::cloud_callback(surface_detector_interfaces::msg::Segmented
     m_results_pub->publish(result_msg);
     auto duration = rclcpp::Duration(this->get_clock()->now() - start);
     RCLCPP_INFO_STREAM(this->get_logger(), "Loop duration: " << duration.seconds());
+}
+
+double SurfaceDetector::computePolygonArea(const pcl::PointCloud<pcl::PointXYZ>::Ptr hull_cloud, 
+                                           const pcl::Vertices& polygon)
+{
+    if (polygon.vertices.size() < 3) {
+        return 0.0;
+    }
+
+    double area = 0.0;
+    size_t n = polygon.vertices.size();
+
+    for (size_t i = 0; i < n; ++i)
+    {
+        const auto& p1 = hull_cloud->points[polygon.vertices[i]];
+        const auto& p2 = hull_cloud->points[polygon.vertices[(i + 1) % n]]; // Use module to wrap around to the first point at the end
+        area += (p1.x * p2.y - p2.x * p1.y);
+    }
+
+    return std::abs(area) / 2.0;
 }
 
 visualization_msgs::msg::Marker SurfaceDetector::create_chull_marker(std::shared_ptr<pcl::PointCloud<pcl::PointXYZ>>hull_points, 
@@ -404,7 +375,21 @@ CallbackReturn SurfaceDetector::on_configure(const rclcpp_lifecycle::State &)
     m_plane_pub = this->create_publisher<sensor_msgs::msg::PointCloud2>("/surface_detector/detected_plane", 10);
     m_results_pub = this->create_publisher<surface_detector_interfaces::msg::DetectionResults>("/surface_detector/results", 10);
     m_closer_cluster_pub = this->create_publisher<sensor_msgs::msg::PointCloud2>("/surface_detector/closer_cluster", 10);
-
+    // Filters
+    m_pass.setFilterFieldName("z");
+    m_height_pass.setFilterFieldName("z");
+    m_grid.setLeafSize(m_voxel_size, m_voxel_size, m_voxel_size);
+    m_seg.setOptimizeCoefficients(true);
+    m_seg.setModelType(pcl::SACMODEL_PARALLEL_PLANE);
+    m_seg.setAxis(Eigen::Vector3f::UnitX());  // Should be Z, but here we are in the camera frame
+    m_seg.setEpsAngle(m_ransac_eps);  //0.087 -> 5deg
+    m_seg.setMethodType(pcl::SAC_RANSAC);
+    m_seg.setMaxIterations(200);
+    m_seg.setDistanceThreshold(m_ransac_distance_threshold);
+    m_cluster.setClusterTolerance(m_cluster_tolerance);  
+    m_cluster.setMinClusterSize(m_min_cluster_size);
+    m_cluster.setSearchMethod(m_kd_tree);
+    m_extract.setNegative(false);
     return CallbackReturn::SUCCESS;
 }
 

@@ -15,7 +15,11 @@
 #include "surface_detector_interfaces/msg/segmented_pointcloud.hpp"
 #include "surface_detector_interfaces/msg/detection_results.hpp"
 #include <pcl/Vertices.h>
-
+#include <pcl/filters/passthrough.h>
+#include <pcl/filters/voxel_grid.h>
+#include <pcl/segmentation/sac_segmentation.h>
+#include <pcl/segmentation/extract_clusters.h>
+#include <pcl/filters/extract_indices.h>
 
 #include "rclcpp_lifecycle/lifecycle_node.hpp"
 #include "rclcpp_lifecycle/lifecycle_publisher.hpp"
@@ -35,6 +39,15 @@ class SurfaceDetector : public rclcpp_lifecycle::LifecycleNode
         bool m_thicken_ransac = true;
         double m_delta_ransac_height = 0.02;
         bool m_enable_vis = true;    // TODO implement
+        float m_voxel_size = 0.02f;
+        // Filters
+        pcl::PassThrough<pcl::PointXYZ> m_pass;
+        pcl::PassThrough<pcl::PointXYZ> m_height_pass;
+        pcl::VoxelGrid<pcl::PointXYZ> m_grid;
+        pcl::SACSegmentation<pcl::PointXYZ> m_seg;
+        pcl::EuclideanClusterExtraction<pcl::PointXYZ> m_cluster;
+        pcl::search::KdTree<pcl::PointXYZ>::Ptr m_kd_tree;
+        pcl::ExtractIndices<pcl::PointXYZ> m_extract;
         // TFs
         std::shared_ptr<tf2_ros::TransformListener> m_tf_listener{nullptr};
         std::unique_ptr<tf2_ros::Buffer> m_tf_buffer_in;
@@ -55,6 +68,8 @@ class SurfaceDetector : public rclcpp_lifecycle::LifecycleNode
                                                             pcl::Vertices polygon, 
                                                             std_msgs::msg::Header header, 
                                                             int plane_id);
+        double computePolygonArea(const pcl::PointCloud<pcl::PointXYZ>::Ptr hull_cloud, 
+                                  const pcl::Vertices& polygon);
 
         using CallbackReturn = rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn;
         CallbackReturn on_configure(const rclcpp_lifecycle::State &);
