@@ -17,6 +17,7 @@
 #include <pcl/segmentation/extract_clusters.h>
 #include <tf2_eigen/tf2_eigen.hpp>
 #include <pcl/common/distances.h>
+#include <pcl/common/common.h>
 
 #include <pcl/filters/project_inliers.h>
 #include <pcl/surface/concave_hull.h>
@@ -88,25 +89,26 @@ void SurfaceDetector::cloud_callback(surface_detector_interfaces::msg::Segmented
     }
     
     // Find height extremes and avg of the object (in reference frame):
-    pcl::CentroidPoint<pcl::PointXYZ> object_centre;
-    pcl::PointXYZ obj_center_xyz;
-    double object_min_h = 1000, object_max_h = -1000, object_avg_h = 0;
-    for (const auto& point : object_pcl_cloud->points)
-    {
-        object_centre.add(point);
-        if (point.z > object_max_h){object_max_h = point.z;}
-        if (point.z < object_min_h){object_min_h = point.z;}
+    Eigen::Vector4f object_centre = Eigen::Vector4f::Zero();;
+    pcl::PointXYZ min_pt, max_pt;
+    if (object_pcl_cloud->empty()) {
+        RCLCPP_WARN(this->get_logger(), "Object cloud is empty, skipping.");
+        return;
     }
-    object_centre.get(obj_center_xyz);
-    object_avg_h = obj_center_xyz.z;
-    RCLCPP_DEBUG_STREAM(this->get_logger(), "Object height values: avg Z: " << object_avg_h << " max Z: " << object_max_h << " min Z: " << object_min_h);
+    pcl::compute3DCentroid(*object_pcl_cloud, object_centre);
+    pcl::getMinMax3D(*object_pcl_cloud, min_pt, max_pt);
+    double object_min_h = min_pt.z;
+    double object_max_h = max_pt.z;
+    double object_avg_h = object_centre[2];
+
+    RCLCPP_INFO_STREAM(this->get_logger(), "Object height values: avg Z: " << object_avg_h << " max Z: " << object_max_h << " min Z: " << object_min_h);
     // Create return container for object pose
     geometry_msgs::msg::PointStamped object_pose_msg;
     object_pose_msg.header.frame_id = m_reference_frame;
     object_pose_msg.header.stamp = pc_in->header.stamp;
     object_pose_msg.point.z = object_max_h; // TODO: check whether to use max H or avg H
-    object_pose_msg.point.x = obj_center_xyz.x;
-    object_pose_msg.point.y = obj_center_xyz.y;
+    object_pose_msg.point.x = object_centre[0];
+    object_pose_msg.point.y = object_centre[1];
     // Filter height of the plane underneath the object
     pcl::PassThrough<pcl::PointXYZ> pass;
     pass.setInputCloud(in_cloud_pre_height_filter);
@@ -130,7 +132,7 @@ void SurfaceDetector::cloud_callback(surface_detector_interfaces::msg::Segmented
     seg.setAxis(Eigen::Vector3f::UnitX());  // Should be Z, but here we are in the camera frame
     seg.setEpsAngle(m_ransac_eps);  //0.087 -> 5deg
     seg.setMethodType(pcl::SAC_RANSAC);
-    seg.setMaxIterations(1000);
+    seg.setMaxIterations(200);
     seg.setDistanceThreshold(m_ransac_distance_threshold);
     seg.setInputCloud(in_cloud_filtered);
     seg.segment(*inliers, *coefficients);
@@ -201,38 +203,33 @@ void SurfaceDetector::cloud_callback(surface_detector_interfaces::msg::Segmented
         RCLCPP_ERROR_STREAM(this->get_logger(), "Unable to cluster. Got only number of ids: " << cluster_ids.size());
         return;
     }
-
+    RCLCPP_INFO(this->get_logger(), "Iterating clusters..");
     // Convert clusters: find the one closer to the object
-    double min_dist = 1000;
-    pcl::PointCloud<pcl::PointXYZ>::Ptr closer_cluster;
+    auto min_dist = std::numeric_limits<double>::infinity();
+    pcl::Indices closer_cluster_ids;
     for (const auto& cluster : cluster_ids)
     {
-        pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_cluster (new pcl::PointCloud<pcl::PointXYZ>); 
-        pcl::CentroidPoint<pcl::PointXYZ> cluster_centre;
-        // Build pontcloud by iterating cluster indicies
-        for (const auto& idx : cluster.indices) {   
-            cloud_cluster->push_back((*plane_points)[idx]);
-            cluster_centre.add((*plane_points)[idx]);
-        }
-        cloud_cluster->width = cloud_cluster->size();  
-        cloud_cluster->height = 1;  
-        cloud_cluster->is_dense = true;
-        pcl::PointXYZ cluster_center_xyz;
-        cluster_centre.get(cluster_center_xyz);
-        // TODO change scoring closer clusters based on eucledian distance
-        double dist = pcl::euclideanDistance(cluster_center_xyz, obj_center_xyz);
+        Eigen::Vector4f centroid = Eigen::Vector4f::Zero();
+        pcl::compute3DCentroid(*plane_points, cluster.indices, centroid);
+        // Scoring closer clusters based on eucledian distance
+        double dist = (centroid.head<3>() - object_centre.head<3>()).norm();
         if(dist < min_dist)
         {
             min_dist = dist;
-            closer_cluster = cloud_cluster;
-        } else if ((dist == min_dist) & (cloud_cluster->points.size() > closer_cluster->points.size()))  // degenerate case: we take the bigger cluster
-        {
-            closer_cluster = cloud_cluster;
+            closer_cluster_ids = cluster.indices;
         }
-        
-        RCLCPP_DEBUG_STREAM(this->get_logger(), "PointCloud representing the Cluster: " << cloud_cluster->size() << " data points.");
     }
-    RCLCPP_DEBUG_STREAM(this->get_logger(), "Closer cluster with: " << closer_cluster->size() << " data points.");
+    // Convert to PC from ids
+    pcl::PointCloud<pcl::PointXYZ>::Ptr closer_cluster = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+    pcl::copyPointCloud(*plane_points, closer_cluster_ids, *closer_cluster);
+
+    // Check if cloud is empty
+    if (closer_cluster->empty())
+    {
+        RCLCPP_ERROR_STREAM(this->get_logger(), "Unable to find a cluster");
+        return;
+    }
+    
 
     // To ensure that we don't achieve a degenerate concave hull we must ensure perfect planarity
     // We project the points on the XY plane -> we set a fixed Z and set points Z to this value
@@ -268,16 +265,19 @@ void SurfaceDetector::cloud_callback(surface_detector_interfaces::msg::Segmented
     concave_hull.reconstruct(*cloud_hull, polygons);
     // Find the outermost polygon, we exclude the holes
     pcl::Vertices biggest_poly;
-    RCLCPP_DEBUG_STREAM(this->get_logger(), "Number of polygons: " << polygons.size());
+    RCLCPP_INFO_STREAM(this->get_logger(), "Number of polygons: " << polygons.size());
     if (polygons.size() > 0)
     {
         // We find the poly with the biggest area
         double max_area = .0;
         for (const auto & it : polygons)
         {
-            RCLCPP_DEBUG_STREAM(this->get_logger(), "Number of verticies in poly: " << it.vertices.size());
+            RCLCPP_INFO_STREAM(this->get_logger(), "Number of verticies in poly: " << it.vertices.size());
             // Area computation
             double area = .0;
+            // Check if poly is degenerate
+            if(it.vertices.size() < 3) 
+                continue;
             for (size_t i = 0; i < it.vertices.size(); ++i)
             {   // current point
                 float x_i, x_ii, y_i, y_ii;
@@ -295,9 +295,7 @@ void SurfaceDetector::cloud_callback(surface_detector_interfaces::msg::Segmented
                     x_ii = cloud_hull->points[it.vertices[i+1]].x;
                     y_ii = cloud_hull->points[it.vertices[i+1]].y;
                 }
-                // area
-                // dX * (y_i - y_i+1 / 2) where dX = x_i+1 - x_i
-                //area += (x_ii - x_i) * (y_i - y_ii/2);
+
                 area += (x_i * y_ii - x_ii * y_i);
 
             }
@@ -308,7 +306,7 @@ void SurfaceDetector::cloud_callback(surface_detector_interfaces::msg::Segmented
                 biggest_poly = it;
             }
         }
-        RCLCPP_DEBUG_STREAM(this->get_logger(), "Got polygon with area: " << max_area << " and verticies: " << biggest_poly.vertices.size());
+        RCLCPP_INFO_STREAM(this->get_logger(), "Got polygon with area: " << max_area << " and verticies: " << biggest_poly.vertices.size());
     }
     else
     {
@@ -317,7 +315,7 @@ void SurfaceDetector::cloud_callback(surface_detector_interfaces::msg::Segmented
     }
     
     // TODO publish only in debug
-    RCLCPP_DEBUG_STREAM(this->get_logger(), "Publishing markers.. with number of chulls: " << cloud_hull->points.size());
+    RCLCPP_INFO_STREAM(this->get_logger(), "Publishing markers.. with number of chulls: " << cloud_hull->points.size());
     visualization_msgs::msg::Marker marker_msg = create_chull_marker(cloud_hull, biggest_poly, full_cloud.header, 1);
     if (m_enable_vis) m_marker_pub->publish(marker_msg);
     
