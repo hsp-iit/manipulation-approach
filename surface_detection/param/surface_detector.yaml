@@ -6,7 +6,7 @@ surface_detector:
     pointcloud_topic: "/object_detector/segmented_pointcloud"
     reference_frame: "geometric_unicycle"
     ransac_eps: 0.2
-    ransac_distance_threshold: 0.02
+    ransac_distance_threshold: 0.03
     thicken_ransac: true
     delta_ransac_height: 0.03
     enable_visualization: true

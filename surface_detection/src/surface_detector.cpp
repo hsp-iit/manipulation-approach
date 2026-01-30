@@ -18,6 +18,7 @@
 #include <tf2_eigen/tf2_eigen.hpp>
 #include <pcl/common/distances.h>
 #include <pcl/common/common.h>
+#include <pcl/filters/voxel_grid.h>
 
 #include <pcl/filters/project_inliers.h>
 #include <pcl/surface/concave_hull.h>
@@ -89,7 +90,7 @@ void SurfaceDetector::cloud_callback(surface_detector_interfaces::msg::Segmented
     }
     
     // Find height extremes and avg of the object (in reference frame):
-    Eigen::Vector4f object_centre = Eigen::Vector4f::Zero();;
+    Eigen::Vector4f object_centre = Eigen::Vector4f::Zero();
     pcl::PointXYZ min_pt, max_pt;
     if (object_pcl_cloud->empty()) {
         RCLCPP_WARN(this->get_logger(), "Object cloud is empty, skipping.");
@@ -113,16 +114,25 @@ void SurfaceDetector::cloud_callback(surface_detector_interfaces::msg::Segmented
     pcl::PassThrough<pcl::PointXYZ> pass;
     pass.setInputCloud(in_cloud_pre_height_filter);
     pass.setFilterFieldName("z");
-    //pass.setFilterLimits(object_min_h - 0.2, object_min_h); // TODO parameterize
     double delta = std::abs(object_max_h - object_min_h) / 2;
-    pass.setFilterLimits(object_avg_h - delta - m_height_offset, object_avg_h);
+    double min_limit = object_avg_h - delta - m_height_offset;
+    if (min_limit >= object_avg_h) {
+        RCLCPP_ERROR_STREAM(this->get_logger(), "PassThrough limits inverted. min: " << min_limit << " max: " << object_avg_h);
+        return;
+    }
+    pass.setFilterLimits(min_limit, object_avg_h);
     pass.filter(*in_cloud_filtered);
     if (in_cloud_filtered->points.size() == 0)
     {
         RCLCPP_ERROR_STREAM(get_logger(), "Obtained an empty pc after heigh filtering with extremes: max: " << object_min_h << " min: " << object_min_h - 0.2);
         return;
     }
-
+    // Voxel grid filtering (downsampling)
+    pcl::VoxelGrid<pcl::PointXYZ> grid;
+    grid.setInputCloud(in_cloud_filtered);
+    float voxel_size = 0.02f;
+    grid.setLeafSize(voxel_size, voxel_size, voxel_size); // TODO parameterize
+    grid.filter(*in_cloud_filtered);
     // RANSAC
     pcl::ModelCoefficients::Ptr coefficients (new pcl::ModelCoefficients);
     pcl::PointIndices::Ptr inliers (new pcl::PointIndices);
@@ -155,11 +165,9 @@ void SurfaceDetector::cloud_callback(surface_detector_interfaces::msg::Segmented
     plane_cloud.header.frame_id = full_cloud.header.frame_id;
     // Find plane avg height
     double plane_height;
-    for (const auto& pt : *plane_points)
-    {
-        plane_height += pt.z;
-    }
-    plane_height = plane_height/plane_points->size();
+    Eigen::Vector4f plane_centre = Eigen::Vector4f::Zero();
+    pcl::compute3DCentroid(*plane_points, plane_centre);
+    plane_height = plane_centre[2];
     if (!m_thicken_ransac)
     {
         if (m_enable_vis) m_plane_pub->publish(plane_cloud);
@@ -229,7 +237,6 @@ void SurfaceDetector::cloud_callback(surface_detector_interfaces::msg::Segmented
         RCLCPP_ERROR_STREAM(this->get_logger(), "Unable to find a cluster");
         return;
     }
-    
 
     // To ensure that we don't achieve a degenerate concave hull we must ensure perfect planarity
     // We project the points on the XY plane -> we set a fixed Z and set points Z to this value
@@ -320,6 +327,7 @@ void SurfaceDetector::cloud_callback(surface_detector_interfaces::msg::Segmented
     if (m_enable_vis) m_marker_pub->publish(marker_msg);
     
     // Publish the custom message for the planner
+    RCLCPP_INFO_STREAM(this->get_logger(), "Publishing result... ");
     surface_detector_interfaces::msg::DetectionResults result_msg;
     result_msg.segmented_object = object_pose_msg;
     std::vector<geometry_msgs::msg::PointStamped> points_array(marker_msg.points.size());

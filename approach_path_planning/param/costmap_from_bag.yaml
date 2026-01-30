@@ -9,7 +9,7 @@ global_costmap:
     use_sim_time: false
     #footprint: "[ [0.2, 0.35], [0.2, -0.35], [-0.2, -0.35], [-0.2, 0.35] ]"
     robot_radius: 0.1
-    trinary_costmap: true
+    trinary_costmap: false
     always_send_full_costmap: True
 
     plugins:
