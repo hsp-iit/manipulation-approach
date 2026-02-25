@@ -15,7 +15,7 @@ rclcpp_lifecycle::LifecycleNode("approach_planner_node", options)
 {
     // TODO declare parameters
     base_frame_ = "geometric_unicycle";
-    costmap_topic_name_ = "/costmap_raw";
+    costmap_topic_name_ = "/global_costmap/costmap_raw";
     contours_topic_name_ = "/surface_detector/results";
     robot_radius_ = 0.2;
     buffer_ = std::make_unique<tf2_ros::Buffer>(this->get_clock());
@@ -585,7 +585,8 @@ CallbackReturn planner::on_configure(const rclcpp_lifecycle::State & state)
     // Pubs
     candidate_marker_pub_ = this->create_publisher<visualization_msgs::msg::Marker>(std::string(this->get_name()) + "/candidate_goals_marker", 10);
     filtered_candidate_marker_pub_ = this->create_publisher<visualization_msgs::msg::Marker>(std::string(this->get_name()) + "/filtered_candidate_marker", 10);
-    goal_pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(std::string(this->get_name()) + "/goal_pose", 10);
+    //goal_pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(std::string(this->get_name()) + "/goal_pose", 10);
+    goal_pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>("/goal_pose", 10);
     return CallbackReturn::SUCCESS;
 }
 
