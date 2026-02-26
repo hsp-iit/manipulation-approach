@@ -182,7 +182,7 @@ void SurfaceDetector::cloud_callback(surface_detector_interfaces::msg::Segmented
     m_cluster.setInputCloud(plane_points);
     m_cluster.extract(cluster_ids);
     //Sanity Check
-    if(cluster_ids.size() <=1)
+    if(cluster_ids.size() <1)
     {
         RCLCPP_ERROR_STREAM(this->get_logger(), "Unable to cluster. Got only number of ids: " << cluster_ids.size());
         return;

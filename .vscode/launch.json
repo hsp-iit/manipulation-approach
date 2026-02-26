@@ -21,6 +21,10 @@
         {
           "name": "RMW_IMPLEMENTATION",
           "value": "${env:RMW_IMPLEMENTATION}"
+        },
+        {
+          "name": "CYCLONEDDS_URI",
+          "value": "${env:CYCLONEDDS_URI}"
         }
       ],
       "externalConsole": false,
