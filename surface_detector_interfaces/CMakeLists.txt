@@ -25,6 +25,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
                             "msg/SegmentedPointcloud.msg"
                             "msg/DetectionResults.msg"
                             "srv/SegmentObject.srv"
+                            "action/ReachObject.action"
                             DEPENDENCIES sensor_msgs geometry_msgs 
                             LIBRARY_NAME ${PROJECT_NAME}
 )

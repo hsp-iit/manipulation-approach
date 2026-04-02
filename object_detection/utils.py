@@ -146,12 +146,14 @@ def project_depth_to_pc_torch(depth : torch.Tensor, color_img : torch.Tensor, ca
 
     # filter depth coords based on z distance
     uu, vv = torch.where((depth > min_depth) & (depth < max_depth))
-    full_xx = (vv - cx) * depth[uu, vv] / fx
-    full_yy = (uu - cy) * depth[uu, vv] / fy
     full_zz = depth[uu, vv] / depth_factor
-    xx = (vv - cx) * depth[uu, vv] * mask_torch[0][uu, vv] / fx
-    yy = (uu - cy) * depth[uu, vv] * mask_torch[0][uu, vv]/ fy
+    full_xx = (vv - cx) * full_zz / fx
+    full_yy = (uu - cy) * full_zz / fy
+    
     zz = depth[uu, vv] * mask_torch[0][uu, vv] / depth_factor
+    xx = (vv - cx) * zz / fx
+    yy = (uu - cy) * zz / fy
+    
     condition = (xx != 0) & (yy != 0) & (zz != 0)
     xx = xx[condition]
     yy = yy[condition]
@@ -161,7 +163,6 @@ def project_depth_to_pc_torch(depth : torch.Tensor, color_img : torch.Tensor, ca
     full_color_cpu = color.detach().cpu().numpy()
     pointcloud = torch.cat((xx.unsqueeze(1), yy.unsqueeze(1), zz.unsqueeze(1)), 1).detach().cpu().numpy()
     full_pointcloud = torch.cat((full_xx.unsqueeze(1), full_yy.unsqueeze(1), full_zz.unsqueeze(1)), 1).detach().cpu().numpy()
-    #uu, vv = uu.cpu().detach().numpy(), vv.detach().cpu().numpy()
 
     header = Header()
     header.frame_id = frame_id
@@ -182,7 +183,7 @@ def project_depth_to_pc_torch(depth : torch.Tensor, color_img : torch.Tensor, ca
                       point_step=(itemsize * nbytes), 
                       row_step = (itemsize * nbytes * pointcloud.shape[0]), 
                       data=xyzrgb.tobytes())
-    #
+    
     full_xyzrgb = np.array(np.hstack([full_pointcloud, full_color_cpu/255]), dtype=np.float32)
     full_msg = PointCloud2(header=header, 
                       height = 1, 

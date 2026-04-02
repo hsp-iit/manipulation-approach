@@ -22,7 +22,8 @@ rclcpp_lifecycle::LifecycleNode("approach_planner_node", options)
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*buffer_);
     state_ = 0;
     costmap_received_ = false;
-    //planner_ = std::make_unique<theta_star::ThetaStar>();
+    max_costmap_val_ = 253;
+    dist_threshold_ = 0.6;
 }
 
 void planner::costmap_update(nav2_msgs::msg::Costmap::SharedPtr msg)
@@ -194,7 +195,7 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
     auto start = this->get_clock()->now();
     int costmap_search_radius = 2; // Since resolution is 5cm, we look in a neighbourhood of 10 cm of an occupied candidate goal.
     std::vector<Eigen::Vector3d> filtered_goals;
-    std::vector<unsigned char> goal_cells_cost;
+    //std::vector<unsigned char> goal_cells_cost;
     // Robot pose in grid coords
     unsigned int r_grid_x, r_grid_y;
     global_costmap_.worldToMap(robot_pose.point.x, robot_pose.point.y, r_grid_x, r_grid_y);
@@ -208,8 +209,7 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
             continue;
         }
         auto cost = global_costmap_.getCost(grid_x, grid_y);
-        double dist_threshold = 0.6;    // distance threshold in meters from the robot to the object
-        if (cost >= 253)    //254 means lethal, 255 unknown, 253 inflated
+        if (cost >= max_costmap_val_)    //254 means lethal, 255 unknown, 253 inflated
         {
             int closest_x, closest_y;
             if (findNearestFreeCell(grid_x, grid_y, closest_x, closest_y, costmap_search_radius))
@@ -220,7 +220,7 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
                 // Filter the poses that cannot reach the object to grasp:
                 double dx = world_x - P[0];
                 double dy = world_y - P[1];
-                if (dx*dx + dy*dy > dist_threshold*dist_threshold)    // TODO parameterize
+                if (dx*dx + dy*dy > dist_threshold_ * dist_threshold_)
                 {
                     continue;
                 }
@@ -240,7 +240,7 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
             // Filter the poses that cannot reach the object to grasp:
             double dx = x - P[0];
             double dy = y - P[1];
-            if (dx*dx + dy*dy > dist_threshold*dist_threshold)    // TODO parameterize
+            if (dx*dx + dy*dy > dist_threshold_ * dist_threshold_)
             {
                 continue;
             }
@@ -253,7 +253,7 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
             // Save the original
             filtered_goals.push_back(Eigen::Vector3d(x, y, theta));
         }
-        goal_cells_cost.push_back(cost);
+        //goal_cells_cost.push_back(cost); // We could need it in the future for heuristic expansion
     }
     // Check if we found at least one valid candidate
     if (filtered_goals.size() < 1)
@@ -327,58 +327,6 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
     }
 }
 
-bool planner::isReachable(nav2_costmap_2d::Costmap2D* costmap, 
-                unsigned int start_mx, unsigned int start_my, 
-                unsigned int goal_mx, unsigned int goal_my) 
-{
-    // Check if goal is an obstacle
-    if (costmap->getCost(goal_mx, goal_my) >= 253) return false;
-
-    int width = costmap->getSizeInCellsX();
-    int height = costmap->getSizeInCellsY();
-    
-    // Keep track of visited cells to avoid infinite loops
-    // Using a 1D vector for speed (index = y * width + x)
-    std::vector<bool> visited(width * height, false);
-    std::queue<std::pair<unsigned int, unsigned int>> q;
-
-    q.push({start_mx, start_my});
-    visited[start_my * width + start_mx] = true;
-
-    // Directions for 4-connected (Up, Down, Left, Right) or 8-connected neighbors
-    int dx[] = {0, 0, 1, -1};
-    int dy[] = {1, -1, 0, 0};
-
-    while (!q.empty()) {
-        auto [cx, cy] = q.front();
-        q.pop();
-
-        // Check if we reached the goal cell
-        if (cx == goal_mx && cy == goal_my) {
-            return true;
-        }
-
-        // Explore neighbors
-        for (int i = 0; i < 4; ++i) {
-            unsigned int nx = cx + dx[i];
-            unsigned int ny = cy + dy[i];
-
-            // Boundary check
-            if (nx >= 0 && nx < (unsigned int)width && ny >= 0 && ny < (unsigned int)height) {
-                int index = ny * width + nx;
-                
-                // If not visited AND not an obstacle
-                if (!visited[index] && costmap->getCost(nx, ny) < 253) {
-                    visited[index] = true;
-                    q.push({nx, ny});
-                }
-            }
-        }
-    }
-
-    return false; // Queue empty, no path found
-}
-
 bool planner::isReachableAstar(nav2_costmap_2d::Costmap2D* costmap, 
                                unsigned int start_mx, unsigned int start_my, 
                                unsigned int goal_mx, unsigned int goal_my)
@@ -431,7 +379,7 @@ bool planner::isReachableAstar(nav2_costmap_2d::Costmap2D* costmap,
                 continue;
             unsigned int cost = costmap->getCost(next_id);
             // Check if wall, lethal or unknown (we don't want unknown space travel)
-            if (cost >= 253)
+            if (cost >= max_costmap_val_)
             {
                 // We add it to already visited to speed up computation for future checks ?
                 visited_ids[next_id] = true;
@@ -468,7 +416,7 @@ bool planner::findNearestFreeCell(int map_x, int map_y, int& out_x, int& out_y, 
     if (! costmap_received_)
         return false;
 
-    unsigned char best_cost = 254;    //Maximum value in costmap (lethal)
+    unsigned char best_cost = max_costmap_val_;    //Maximum value in costmap (lethal) TODO parameterize
     bool found = false;
 
     for (int dx = -radius; dx <= radius; ++dx) 
@@ -534,7 +482,7 @@ bool planner::generateMarkerMsg(std::vector<Eigen::Vector3d> poses,
 
 CallbackReturn planner::on_configure(const rclcpp_lifecycle::State & state)
 {
-    RCLCPP_INFO(get_logger(), "Configuring...");
+    RCLCPP_INFO(get_logger(), "Configuring... %s", state.label().c_str());
     // TODO: get parameters
     state_ = 0; // 0 standby : 1 navigating
     //Action Client
@@ -548,7 +496,7 @@ CallbackReturn planner::on_configure(const rclcpp_lifecycle::State & state)
                             get_node_logging_interface(),
                             get_node_waitables_interface(),
                             "navigate_to_pose", nav_callback_group_);
-
+    client_node_ = std::make_shared<rclcpp::Node>("nav_action_client_node_planning_approach");
     nav_feedback_sub_ = this->create_subscription<nav2_msgs::action::NavigateToPose::Impl::FeedbackMessage>(
                 "navigate_to_pose/_action/feedback",
                 rclcpp::SystemDefaultsQoS(),
@@ -569,7 +517,7 @@ CallbackReturn planner::on_configure(const rclcpp_lifecycle::State & state)
                     // TODO write logic on completion???
                     RCLCPP_INFO( this->get_logger(), "GOAL STATUS: %i", msg->status_list.back().status);
                 });
-    client_node_ = std::make_shared<rclcpp::Node>("nav_action_client_node_planning_approach");
+    
 
     // Subs
     costmap_sub_ = this->create_subscription<nav2_msgs::msg::Costmap>(costmap_topic_name_,
@@ -585,7 +533,6 @@ CallbackReturn planner::on_configure(const rclcpp_lifecycle::State & state)
     // Pubs
     candidate_marker_pub_ = this->create_publisher<visualization_msgs::msg::Marker>(std::string(this->get_name()) + "/candidate_goals_marker", 10);
     filtered_candidate_marker_pub_ = this->create_publisher<visualization_msgs::msg::Marker>(std::string(this->get_name()) + "/filtered_candidate_marker", 10);
-    //goal_pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(std::string(this->get_name()) + "/goal_pose", 10);
     goal_pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>("/goal_pose", 10);
     return CallbackReturn::SUCCESS;
 }
@@ -595,7 +542,7 @@ CallbackReturn planner::on_activate(const rclcpp_lifecycle::State & state)
     candidate_marker_pub_->on_activate();
     filtered_candidate_marker_pub_->on_activate();
     goal_pose_pub_->on_activate();
-    RCLCPP_INFO(get_logger(), "Activating");
+    RCLCPP_INFO(get_logger(), "Activating %s", state.label().c_str());
     return CallbackReturn::SUCCESS;
 }
 
@@ -604,19 +551,19 @@ CallbackReturn planner::on_deactivate(const rclcpp_lifecycle::State & state)
     candidate_marker_pub_->on_deactivate();
     filtered_candidate_marker_pub_->on_deactivate();
     goal_pose_pub_->on_deactivate();
-    RCLCPP_INFO(get_logger(), "Deactivating");
+    RCLCPP_INFO(get_logger(), "Deactivating: %s", state.label().c_str());
     return CallbackReturn::SUCCESS;
 }
 
 CallbackReturn planner::on_error(const rclcpp_lifecycle::State & state)
 {
-    RCLCPP_INFO(get_logger(), "Error");
+    RCLCPP_INFO(get_logger(), "Error state: %s", state.label().c_str());
     return CallbackReturn::SUCCESS;
 }
 
 CallbackReturn planner::on_shutdown(const rclcpp_lifecycle::State & state)
 {
-    RCLCPP_INFO(get_logger(), "Shutting down");
+    RCLCPP_INFO(get_logger(), "Shutting down from state: %s", state.label().c_str());
     return CallbackReturn::SUCCESS;
 }
 
@@ -626,7 +573,7 @@ CallbackReturn planner::on_cleanup(const rclcpp_lifecycle::State & state)
     candidate_marker_pub_.reset();
     filtered_candidate_marker_pub_.reset();
     goal_pose_pub_.reset();
-    RCLCPP_INFO(get_logger(), "Cleanup");
+    RCLCPP_INFO(get_logger(), "Cleanup: %s", state.label().c_str());
     return CallbackReturn::SUCCESS;
 }
 

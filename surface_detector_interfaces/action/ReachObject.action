@@ -1,0 +1,10 @@
+# Request
+string object_string
+# float32 timeout
+---
+# Result
+bool reached
+string error_msg
+---
+# Feedback
+float32 distance_remaining

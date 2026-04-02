@@ -11,18 +11,27 @@ import cv2
 
 import torch
 from torchvision.ops import box_convert
+import time
 # ROS2
 import rclpy
-import time
+from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.action import ActionServer
+from rclpy.action.server import ServerGoalHandle
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
+from nav2_msgs.action._navigate_to_pose import NavigateToPose_FeedbackMessage
+from action_msgs.msg._goal_status_array import GoalStatusArray
+from action_msgs.msg._goal_status import GoalStatus
 from sensor_msgs.msg import PointCloud2, CameraInfo, Image
 from visualization_msgs.msg import MarkerArray
 from tf2_ros import TransformListener, Buffer
+import asyncio
+
 import message_filters
 from ultralytics import SAM
 from surface_detector_interfaces.msg import SegmentedPointcloud
 from surface_detector_interfaces.srv import SegmentObject
+from surface_detector_interfaces.action import ReachObject
 
 import utils
 
@@ -66,9 +75,13 @@ class ObjectDetector(Node):
         self.object_pointcloud_topic = self.get_parameter("object_pointcloud_topic").value
         self.full_pointcloud_topic = self.get_parameter("full_pointcloud_topic").value
         self.device = "cuda"
+        self.feedback_dist = 0.0
+        self.navigation_start_timeout = 20.0
 
         self.get_logger().info(f'Using parameters: {img_topic=}  {depth_topic=}  {use_camera_info_topic=}  {camera_info_topic=} \n'
                                f'{self.object_pointcloud_topic=}  {self.robot_base_frame=}')
+        
+        self.cb_grp = ReentrantCallbackGroup()
 
         # Enable camera info subscriber or load params
         if use_camera_info_topic == True:
@@ -76,7 +89,8 @@ class ObjectDetector(Node):
                 CameraInfo,
                 camera_info_topic,
                 self.camera_info_callback,
-                10
+                10,
+                callback_group=self.cb_grp
             )
             self.camera_info_available = False
         else:
@@ -99,16 +113,23 @@ class ObjectDetector(Node):
         self.marker_pub = self.create_publisher(MarkerArray, self.get_name() + '/plane_markers', 10)
         self.seg_pc_pub = self.create_publisher(SegmentedPointcloud, self.get_name() + "/segmented_pointcloud", 10)
         # Services
-        self.segment_object_srv = self.create_service(SegmentObject, self.get_name() + "/object_to_find", self.object_to_find)
+        #self.segment_object_srv = self.create_service(SegmentObject, self.get_name() + "/object_to_find", self.object_to_find)
 
         # DINO model : TODO set params for DINO configs path
-        self.dino_model = load_model("/home/user1/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py", "/home/user1/GroundingDINO/weights/groundingdino_swint_ogc.pth")
+        self.dino_model = load_model("/home/user1/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py", 
+                                     "/home/user1/GroundingDINO/weights/groundingdino_swint_ogc.pth")
         # Annotated img pub (debug only)
         self.annotated_img_pub = self.create_publisher(Image, "/annotated_dino_img", 10)
         # SAM
         self.sam = SAM("sam2.1_l.pt")
         self.annotated_sam_pub = self.create_publisher(Image, "/sam_mask_img", 10)  # for debug
-
+        # Action server
+        self.reach_object_action_server = ActionServer(self, action_type=ReachObject, 
+                                                       action_name="/reach_object", 
+                                                       execute_callback=self.reach_object_callback, 
+                                                       callback_group=self.cb_grp)
+        self.nav_feedback_sub = self.create_subscription(NavigateToPose_FeedbackMessage, "navigate_to_pose/_action/feedback", self.feedback_sub, 10, callback_group=self.cb_grp)
+        self.nav_status_sub = self.create_subscription(GoalStatusArray, "navigate_to_pose/_action/status", self.goal_status_cbk, 10, callback_group=self.cb_grp)
 
     def camera_callback(self, img_msg : Image, depth_msg : Image):
         if not self.camera_info_available:
@@ -200,20 +221,91 @@ class ObjectDetector(Node):
             self.calib_mat = np.array(msg.k, dtype=np.float32).reshape((3, 3))
             self.camera_info_available = True
 
-    def object_to_find(self, request : SegmentObject.Request, response : SegmentObject.Response):
-        if request.object_string is not None:
-            self.object_string = request.object_string
-            response.is_ok = True
-            if self.object_string == "":
-                self.get_logger().info("[object_to_find] Received empty string. Stopping looking for objects")
-            else:
-                self.get_logger().info(f"[object_to_find] Looking for object {self.object_string=}")
-        else:
-            response.is_ok = False
-            response.error_msg = f"[object_to_find] None object received as: {request.object_string=}"
-            self.get_logger().error(response.error_msg)
+    async def reach_object_callback(self, goal_handle : ServerGoalHandle):
+        feedback_msg = ReachObject.Feedback()
+        self.get_logger().info(f"Received request to reach object {goal_handle.request.object_string}")
+        self.object_string = goal_handle.request.object_string
         
-        return response
+        # Enable other nodes? -> TODO think how to do it (probably using srv, but it's an optional feature)
+
+        # Wait for the navigation to start
+        start_wait_time = time.time()
+        while (self.goal_status != GoalStatus.STATUS_EXECUTING and (time.time() - start_wait_time) <= self.navigation_start_timeout):
+            await asyncio.sleep(0.2)
+            if goal_handle.is_cancel_requested:
+                goal_handle.canceled()
+                result = ReachObject.Result()
+                result.reached = False
+                result.error_msg = "Request cancelled"
+                return result
+        # Timeout condition
+        if (time.time() - start_wait_time) > self.navigation_start_timeout:
+            goal_handle.canceled()
+            result = ReachObject.Result()
+            result.reached = False
+            result.error_msg = "Timeout while starting the approach pipeline untill navigation"
+            return result
+        # Navigation started -> Now wait for it's end
+        while (self.goal_status == GoalStatus.STATUS_EXECUTING):
+            await asyncio.sleep(0.2)
+            if goal_handle.is_cancel_requested:
+                goal_handle.canceled()
+                result = ReachObject.Result()
+                result.reached = False
+                result.error_msg = "Request cancelled"
+                return result
+            # Publish feedback
+            feedback_msg.distance_remaining = self.feedback_dist
+            goal_handle.publish_feedback(feedback_msg)
+        # Stop the object search
+        self.object_string = "" # IMPORTANT: stop the search of objects TODO: use bool?
+        result = ReachObject.Result()
+        if self.goal_status == GoalStatus.STATUS_SUCCEEDED:
+            # Finish action server
+            result.reached = True
+            goal_handle.succeed()
+        else:
+            result.reached = False
+            result.error_msg = f"Goal failed with status: {self.goal_status}"
+            goal_handle.canceled()  # Cancel action
+        return result
+    
+    #def object_to_find(self, request : SegmentObject.Request, response : SegmentObject.Response):
+    #    if request.object_string is not None:
+    #        self.object_string = request.object_string
+    #        response.is_ok = True
+    #        if self.object_string == "":
+    #            self.get_logger().info("[object_to_find] Received empty string. Stopping looking for objects")
+    #        else:
+    #            self.get_logger().info(f"[object_to_find] Looking for object {self.object_string=}")
+    #    else:
+    #        response.is_ok = False
+    #        response.error_msg = f"[object_to_find] None object received as: {request.object_string=}"
+    #        self.get_logger().error(response.error_msg)
+    #    
+    #    return response
+    
+    def feedback_sub(self, msg : NavigateToPose_FeedbackMessage):
+        self.feedback_dist = msg.feedback.distance_remaining
+
+    def goal_status_cbk(self, msg : GoalStatusArray):
+        # We take the status of the last goal
+        self.goal_status = msg.status_list[-1].status
+        ## Values:
+        #int8 STATUS_UNKNOWN = 0
+        ## The goal has been accepted and is awaiting execution.
+        #int8 STATUS_ACCEPTED = 1
+        ## The goal is currently being executed by the action server.
+        #int8 STATUS_EXECUTING = 2
+        ## The client has requested that the goal be canceled and the action server has
+        ## accepted the cancel request.
+        #int8 STATUS_CANCELING = 3
+        ## The goal was achieved successfully by the action server.
+        #int8 STATUS_SUCCEEDED = 4
+        ## The goal was canceled after an external request from an action client.
+        #int8 STATUS_CANCELED = 5
+        ## The goal was terminated by the action server without an external request.
+        #int8 STATUS_ABORTED = 6
 
 def main():
     rclpy.init()

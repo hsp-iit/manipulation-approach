@@ -40,6 +40,10 @@ private:
     int state_;
     // TODO subscribe to robot footprint for extracting this param:
     double robot_radius_;
+    // Costmap value above which we consider it lethal
+    unsigned int max_costmap_val_;
+    // Maximum distance tolerated between the robot and the object to grasp
+    double dist_threshold_;
 
     // ------------ Action client vars:
     rclcpp_action::Client<nav2_msgs::action::NavigateToPose>::SharedPtr nav_client_;
@@ -81,9 +85,6 @@ private:
                             Eigen::Vector3d rgb,
                             std::string frame_id = "map",
                             double z_height = 0.2);
-    bool isReachable(nav2_costmap_2d::Costmap2D* costmap, 
-                     unsigned int start_mx, unsigned int start_my, 
-                     unsigned int goal_mx, unsigned int goal_my);
     bool isReachableAstar(nav2_costmap_2d::Costmap2D* costmap, 
                      unsigned int start_mx, unsigned int start_my, 
                      unsigned int goal_mx, unsigned int goal_my);
