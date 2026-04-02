@@ -35,10 +35,12 @@ RUN export ROS_APT_SOURCE_VERSION=$(curl -s https://api.github.com/repos/ros-inf
     curl -L -o /tmp/ros2-apt-source.deb "https://github.com/ros-infrastructure/ros-apt-source/releases/download/${ROS_APT_SOURCE_VERSION}/ros2-apt-source_${ROS_APT_SOURCE_VERSION}.$(. /etc/os-release && echo $VERSION_CODENAME)_all.deb" && \
     sudo apt install /tmp/ros2-apt-source.deb
 
-RUN sudo apt update && sudo apt install ros-$ROS_DISTRO-ros-base \
+RUN sudo apt update && sudo apt install -y ros-$ROS_DISTRO-ros-base \
     ros-$ROS_DISTRO-sensor-msgs ros-$ROS_DISTRO-geometry-msgs \
-    ros-$ROS_DISTRO-action-msgs ros-$ROS_DISTRO-actionlib-msgs ros-$ROS_DISTRO-nav2-rviz-plugins \
-    ros-$ROS_DISTRO-nav2-msgs ros-$ROS_DISTRO-nav2-simple-commander ros-$ROS_DISTRO-rviz2 ros-dev-tools -y
+    ros-$ROS_DISTRO-action-msgs ros-$ROS_DISTRO-actionlib-msgs \
+    ros-$ROS_DISTRO-nav2-rviz-plugins ros-$ROS_DISTRO-rviz2 ros-dev-tools \
+    ros-$ROS_DISTRO-nav2-msgs ros-$ROS_DISTRO-nav2-simple-commander  \
+    ros-$ROS_DISTRO-nav2-costmap-2d
 
 RUN sudo apt update && sudo apt install ros-$ROS_DISTRO-rmw-cyclonedds-cpp -y
 ENV RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
@@ -64,7 +66,7 @@ ARG GIT_TOKEN
 RUN sudo apt update && sudo apt install -y python3-pip
 
 # Cuda ENV
-ENV TORCH_CUDA_ARCH_LIST="8.6"
+ENV TORCH_CUDA_ARCH_LIST="7.5;8.6"
 ENV FORCE_CUDA="1"
 
 # Grounding DINO

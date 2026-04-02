@@ -1,0 +1,2 @@
+geometry_msgs/PointStamped segmented_object
+geometry_msgs/PointStamped[] surface_contours

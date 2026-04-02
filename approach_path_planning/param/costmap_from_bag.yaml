@@ -1,0 +1,64 @@
+global_costmap:
+  ros__parameters:
+    global_frame: map
+    robot_base_frame: geometric_unicycle
+    update_frequency: 5.0
+    publish_frequency: 10.0
+    resolution: 0.05
+    track_unknown_space: true
+    use_sim_time: false
+    #footprint: "[ [0.2, 0.35], [0.2, -0.35], [-0.2, -0.35], [-0.2, 0.35] ]"
+    robot_radius: 0.1
+    trinary_costmap: false
+    always_send_full_costmap: True
+
+    plugins:
+      - {name: static_layer, type: "nav2_costmap_2d::StaticLayer"}
+      - {name: obstacle_layer, type: "nav2_costmap_2d::ObstacleLayer"}
+      - {name: inflation_layer, type: "nav2_costmap_2d::InflationLayer"}
+
+    static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        map_subscribe_transient_local: True
+        enabled: True
+        subscribe_to_updates: True
+        transform_tolerance: 0.2
+      
+    obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: True
+        footprint_clearing_enabled: True
+        max_obstacle_height: 2.0
+        combination_method: 1
+        observation_sources: pointcloud_mark pointcloud_clear
+        pointcloud_mark:  # no frame set, uses frame from message
+          topic: /object_detector/full_pointcloud #/imu_filtered_depth
+          max_obstacle_height: 2.0
+          min_obstacle_height: 0.1  #0.15
+          obstacle_max_range: 6.0
+          obstacle_min_range: 0.1
+          raytrace_max_range: 7.0
+          raytrace_min_range: 0.0
+          clearing: false
+          marking: true
+          data_type: "PointCloud2"
+        pointcloud_clear:  # no frame set, uses frame from message
+          topic: /object_detector/full_pointcloud #/imu_filtered_depth
+          max_obstacle_height: 3.5
+          min_obstacle_height: -3.5
+          obstacle_max_range: 7.0
+          obstacle_min_range: 0.0
+          raytrace_max_range: 7.5
+          raytrace_min_range: 0.0
+          clearing: true
+          marking: false
+          data_type: "PointCloud2"
+
+    inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        enabled: true
+        cost_scaling_factor: 1.5    #2.5    0.2
+        inflation_radius: 4.0    #0.55      0.3
+        inflate_unknown: false
+        inflate_around_unknown: false
+
