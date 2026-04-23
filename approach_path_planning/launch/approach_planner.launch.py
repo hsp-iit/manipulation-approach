@@ -26,7 +26,7 @@ def generate_launch_description():
     #        get_package_share_directory('approach_path_planning'),
     #        'param',
     #        'approach_path_planning.yaml'))
-    
+
     approach_planner = launch_ros.actions.LifecycleNode(
             name = 'approach_planner',
             namespace='',
@@ -35,31 +35,17 @@ def generate_launch_description():
             output='screen',
             #parameters=[approach_planner_dir]
         )
-    
+
     to_inactive = launch.actions.EmitEvent(
         event=launch_ros.events.lifecycle.ChangeState(
             lifecycle_node_matcher=launch.events.matches_action(approach_planner),
             transition_id=lifecycle_msgs.msg.Transition.TRANSITION_CONFIGURE,
         )
     )
-    
-    from_unconfigured_to_inactive = launch.actions.RegisterEventHandler(
-        launch_ros.event_handlers.OnStateTransition(
-            target_lifecycle_node=approach_planner, 
-            goal_state='unconfigured',
-            entities=[
-                launch.actions.LogInfo(msg="-- Unconfigured --"),
-                launch.actions.EmitEvent(event=launch_ros.events.lifecycle.ChangeState(
-                    lifecycle_node_matcher=launch.events.matches_action(approach_planner),
-                    transition_id=lifecycle_msgs.msg.Transition.TRANSITION_CONFIGURE,
-                )),
-            ],
-        )
-    )
 
     from_inactive_to_active = launch.actions.RegisterEventHandler(
         launch_ros.event_handlers.OnStateTransition(
-            target_lifecycle_node=approach_planner, 
+            target_lifecycle_node=approach_planner,
             start_state = 'configuring',
             goal_state='inactive',
             entities=[
@@ -72,11 +58,10 @@ def generate_launch_description():
         )
     )
 
-    ld.add_action(from_unconfigured_to_inactive)
     ld.add_action(from_inactive_to_active)
     ld.add_action(approach_planner)
     ld.add_action(to_inactive)
-    
+
     return LaunchDescription([
         DeclareLaunchArgument(
             'use_sim_time',

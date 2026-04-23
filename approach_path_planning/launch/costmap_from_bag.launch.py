@@ -37,6 +37,9 @@ def generate_launch_description():
             name='global_costmap',
             namespace='',
             output='screen',
+            remappings=[
+                ('/costmap_raw', '/global_costmap/costmap_raw'),
+            ],
             parameters=[params_file,
                 {'use_sim_time': use_sim_time}
             ],
