@@ -19,13 +19,14 @@ from launch.substitutions import LaunchConfiguration
 
 def generate_launch_description():
     use_sim_time = LaunchConfiguration('use_sim_time', default='false')
+    planner_param_default = os.path.join(
+        get_package_share_directory('approach_path_planning'),
+        'param',
+        'approach_path_planning.yaml')
+    approach_planner_dir = LaunchConfiguration(
+        'approach_path_planning',
+        default=planner_param_default)
     ld = launch.LaunchDescription()
-    #approach_planner_dir = launch.substitutions.LaunchConfiguration(
-    #    'approach_path_planning',
-    #    default=os.path.join(
-    #        get_package_share_directory('approach_path_planning'),
-    #        'param',
-    #        'approach_path_planning.yaml'))
 
     approach_planner = launch_ros.actions.LifecycleNode(
             name = 'approach_planner',
@@ -33,7 +34,7 @@ def generate_launch_description():
             package='approach_path_planning',
             executable='approach_planner',
             output='screen',
-            #parameters=[approach_planner_dir]
+            parameters=[approach_planner_dir]
         )
 
     to_inactive = launch.actions.EmitEvent(
@@ -63,6 +64,10 @@ def generate_launch_description():
     ld.add_action(to_inactive)
 
     return LaunchDescription([
+        DeclareLaunchArgument(
+            'approach_path_planning',
+            default_value=planner_param_default,
+            description='Path to the approach planner parameter file.'),
         DeclareLaunchArgument(
             'use_sim_time',
             default_value='false',

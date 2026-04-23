@@ -44,6 +44,12 @@ private:
     unsigned int max_costmap_val_;
     // Maximum distance tolerated between the robot and the object to grasp
     double dist_threshold_;
+    bool enable_window_tangent_orientation_;
+    int orientation_window_size_;
+    double orientation_object_weight_;
+    double orientation_contour_normal_weight_;
+    double orientation_face_tolerance_deg_;
+    double orientation_perp_tolerance_deg_;
 
     // ------------ Action client vars:
     rclcpp_action::Client<nav2_msgs::action::NavigateToPose>::SharedPtr nav_client_;

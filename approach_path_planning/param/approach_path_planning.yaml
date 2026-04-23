@@ -1,0 +1,16 @@
+approach_planner:
+  ros__parameters:
+    base_frame: "geometric_unicycle"
+    costmap_topic_name: "/global_costmap/costmap_raw"
+    contours_topic_name: "/surface_detector/results"
+    robot_radius: 0.2
+    max_costmap_val: 253
+    dist_threshold: 0.6
+
+    # Orientation shaping (toggle + tuning)
+    enable_window_tangent_orientation: true
+    orientation_window_size: 2
+    orientation_object_weight: 0.7
+    orientation_contour_normal_weight: 0.3
+    orientation_face_tolerance_deg: 40.0
+    orientation_perp_tolerance_deg: 40.0

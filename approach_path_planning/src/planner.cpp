@@ -7,6 +7,7 @@
 #include <tf2/transform_datatypes.h>
 #include <tf2/LinearMath/Quaternion.h>
 #include <queue>
+#include <limits>
 
 using namespace approach_path_planning;
 
@@ -14,6 +15,19 @@ planner::planner(const rclcpp::NodeOptions & options) :
 rclcpp_lifecycle::LifecycleNode("approach_planner_node", options)
 {
     // TODO declare parameters
+    this->declare_parameter<std::string>("base_frame", "geometric_unicycle");
+    this->declare_parameter<std::string>("costmap_topic_name", "/global_costmap/costmap_raw");
+    this->declare_parameter<std::string>("contours_topic_name", "/surface_detector/results");
+    this->declare_parameter<double>("robot_radius", 0.2);
+    this->declare_parameter<int>("max_costmap_val", 253);
+    this->declare_parameter<double>("dist_threshold", 0.6);
+    this->declare_parameter<bool>("enable_window_tangent_orientation", true);
+    this->declare_parameter<int>("orientation_window_size", 2);
+    this->declare_parameter<double>("orientation_object_weight", 0.7);
+    this->declare_parameter<double>("orientation_contour_normal_weight", 0.3);
+    this->declare_parameter<double>("orientation_face_tolerance_deg", 40.0);
+    this->declare_parameter<double>("orientation_perp_tolerance_deg", 40.0);
+
     base_frame_ = "geometric_unicycle";
     costmap_topic_name_ = "/global_costmap/costmap_raw";
     contours_topic_name_ = "/surface_detector/results";
@@ -24,6 +38,12 @@ rclcpp_lifecycle::LifecycleNode("approach_planner_node", options)
     costmap_received_ = false;
     max_costmap_val_ = 253;
     dist_threshold_ = 0.6;
+    enable_window_tangent_orientation_ = true;
+    orientation_window_size_ = 2;
+    orientation_object_weight_ = 0.7;
+    orientation_contour_normal_weight_ = 0.3;
+    orientation_face_tolerance_deg_ = 40.0;
+    orientation_perp_tolerance_deg_ = 40.0;
 }
 
 void planner::costmap_update(nav2_msgs::msg::Costmap::SharedPtr msg)
@@ -91,7 +111,8 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
     // we consider these points to be the optimal ones to reach for grasping the object (since it's closer)
     std::vector<Eigen::Vector2d> approach_point_vec(L);
     Eigen::Vector2d robot_pose_eigen (robot_pose.point.x, robot_pose.point.y);
-    std::vector<Eigen::Vector3d> candidate_goals(L);    // X, Y, Theta
+    std::vector<Eigen::Vector3d> candidate_goals;    // X, Y, Theta
+    candidate_goals.reserve(L);
     double min_dist;
     Eigen::Vector2d P;
     P[0] = transformed_pose.point.x;
@@ -166,8 +187,74 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
         Eigen::Vector2d outward_normal = (area >= 0 ? normal_right : normal_left);
         // For keeping things simple: we compute points outside the contours by a fixed offset (based on the robot radius)
         Eigen::Vector2d pose_xy = approach_point_vec[i] + outward_normal.normalized() * robot_radius_;
+
+        // Orientation logic: face object while staying mostly perpendicular to local contour.
         double theta = std::atan2(-outward_normal.y(), -outward_normal.x());
-        candidate_goals[i] = Eigen::Vector3d(pose_xy[0], pose_xy[1], theta);
+        bool valid_orientation = true;
+
+        if (enable_window_tangent_orientation_)
+        {
+            // 1) Estimate local tangent around i using a symmetric window to make it robust on jagged contours.
+            int radius = std::max(1, orientation_window_size_);
+            Eigen::Vector2d smooth_tangent(0.0, 0.0);
+            for (int r = 1; r <= radius; ++r)
+            {
+                int prev_idx = (static_cast<int>(i) - r + static_cast<int>(L)) % static_cast<int>(L);
+                int next_idx = (static_cast<int>(i) + r) % static_cast<int>(L);
+                Eigen::Vector2d prev_pt(transformed_contours[prev_idx].point.x, transformed_contours[prev_idx].point.y);
+                Eigen::Vector2d next_pt(transformed_contours[next_idx].point.x, transformed_contours[next_idx].point.y);
+                smooth_tangent += (next_pt - prev_pt);
+            }
+            if (smooth_tangent.norm() < 1e-8)
+            {
+                smooth_tangent = AB;
+            }
+            smooth_tangent.normalize();
+
+            // 2) Build inward normal from smoothed tangent.
+            Eigen::Vector2d smooth_left(-smooth_tangent.y(), smooth_tangent.x());
+            Eigen::Vector2d smooth_right(smooth_tangent.y(), -smooth_tangent.x());
+            Eigen::Vector2d smooth_outward = (area >= 0 ? smooth_right : smooth_left);
+            Eigen::Vector2d inward_normal = -smooth_outward.normalized();
+
+            // 3) Direction to object from candidate pose.
+            Eigen::Vector2d to_object = P - pose_xy;
+            if (to_object.norm() < 1e-8)
+            {
+                valid_orientation = false;
+            }
+            else
+            {
+                to_object.normalize();
+
+                // 4) Blend objective: look at object + stay close to inward normal.
+                Eigen::Vector2d blended_dir = orientation_object_weight_ * to_object +
+                                              orientation_contour_normal_weight_ * inward_normal;
+                if (blended_dir.norm() < 1e-8)
+                {
+                    blended_dir = to_object;
+                }
+                blended_dir.normalize();
+                theta = std::atan2(blended_dir.y(), blended_dir.x());
+
+                // 5) Orientation checks (configurable):
+                //    - must face object within tolerance
+                //    - must be roughly perpendicular to local contour tangent
+                constexpr double kPi = 3.14159265358979323846;
+                double face_tol_rad = orientation_face_tolerance_deg_ * kPi / 180.0;
+                double perp_tol_rad = orientation_perp_tolerance_deg_ * kPi / 180.0;
+                double face_dot = blended_dir.dot(to_object);
+                double perp_dot = std::abs(blended_dir.dot(smooth_tangent));
+
+                valid_orientation = (face_dot >= std::cos(face_tol_rad)) &&
+                                    (perp_dot <= std::sin(perp_tol_rad));
+            }
+        }
+
+        if (valid_orientation)
+        {
+            candidate_goals.push_back(Eigen::Vector3d(pose_xy[0], pose_xy[1], theta));
+        }
     }
     RCLCPP_INFO_STREAM(get_logger(), "Found possible approach points: " << approach_point_vec.size());
 
@@ -198,7 +285,13 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
     //std::vector<unsigned char> goal_cells_cost;
     // Robot pose in grid coords
     unsigned int r_grid_x, r_grid_y;
-    global_costmap_.worldToMap(robot_pose.point.x, robot_pose.point.y, r_grid_x, r_grid_y);
+    if (!global_costmap_.worldToMap(robot_pose.point.x, robot_pose.point.y, r_grid_x, r_grid_y))
+    {
+        RCLCPP_ERROR_STREAM(
+            get_logger(),
+            "Robot pose is outside costmap bounds. x=" << robot_pose.point.x << " y=" << robot_pose.point.y);
+        return;
+    }
     for (const auto & it : candidate_goals)
     {
         unsigned int grid_x, grid_y;
@@ -331,69 +424,113 @@ bool planner::isReachableAstar(nav2_costmap_2d::Costmap2D* costmap,
                                unsigned int start_mx, unsigned int start_my, 
                                unsigned int goal_mx, unsigned int goal_my)
 {
-    // Costmap bounds
-    unsigned int width = costmap->getSizeInCellsX();
-    unsigned int height = costmap->getSizeInCellsY();
+    const unsigned int width = costmap->getSizeInCellsX();
+    const unsigned int height = costmap->getSizeInCellsY();
 
-    // Queue containing all the cells to evaluate for finding the start
-    // These are ordered by the smaller score first
+    // Basic bounds sanity checks
+    if (start_mx >= width || start_my >= height || goal_mx >= width || goal_my >= height)
+    {
+        return false;
+    }
+
+    const unsigned int start_cost = costmap->getCost(start_mx, start_my);
+    const unsigned int goal_cost = costmap->getCost(goal_mx, goal_my);
+    // Reject if start/goal are in occupied or unknown cells
+    if (start_cost >= max_costmap_val_ || goal_cost >= max_costmap_val_)
+    {
+        return false;
+    }
+
+    const int start_id = static_cast<int>(costmap->getIndex(start_mx, start_my));
+    const int goal_id = static_cast<int>(costmap->getIndex(goal_mx, goal_my));
+
+    // Queue containing all the cells to evaluate (lower score first)
     std::priority_queue<Cell, std::vector<Cell>, std::greater<Cell>> q;
-    
-    Cell goal_cell;
-    goal_cell.id = goal_my * width + goal_mx;
-    goal_cell.score = std::hypot(goal_mx - start_mx, goal_my - start_my);
-    goal_cell.path_lenght = 0.0;
-    q.push(goal_cell);
+
+    Cell start_cell;
+    start_cell.id = start_id;
+    start_cell.path_lenght = 0.0;
+    start_cell.score = std::hypot(static_cast<double>(goal_mx) - static_cast<double>(start_mx),
+                                  static_cast<double>(goal_my) - static_cast<double>(start_my));
+    q.push(start_cell);
 
     const std::vector<int> dx = {0, 0, 1, -1};
     const std::vector<int> dy = {-1, 1, 0, 0};
-    std::vector<bool> visited_ids;
-    visited_ids.resize(width * height, false);
-    visited_ids[goal_cell.id] = true;
+
+    const size_t map_size = static_cast<size_t>(width) * static_cast<size_t>(height);
+    std::vector<bool> closed(map_size, false);
+    std::vector<double> best_g(map_size, std::numeric_limits<double>::infinity());
+    best_g[static_cast<size_t>(start_id)] = 0.0;
 
     // A* search loop
     while (!q.empty())
     {
-        // Latest cell
         Cell cell = q.top();
-        q.pop(); // Remove the cell explored
+        q.pop();
+
+        const size_t cell_idx = static_cast<size_t>(cell.id);
+        if (closed[cell_idx])
+        {
+            continue;
+        }
+        closed[cell_idx] = true;
+
+        if (cell.id == goal_id)
+        {
+            return true;
+        }
+
         unsigned int mx, my;
         costmap->indexToCells(cell.id, mx, my);
 
-        // Check if reached the start
-        if (mx == start_mx && my == start_my)
-            return true;
-        
         // Expand neighbors
-        for (size_t i = 0; i < dx.size(); i++)
+        for (size_t i = 0; i < dx.size(); ++i)
         {
-            int next_x = (int)mx + dx[i];
-            int next_y = (int)my + dy[i];
-            // Out of map bounds
-            if (next_x >= (int)width || next_x < 0 || 
-                next_y >= (int)height || next_y < 0)
-                continue;
-            int next_id = costmap->getIndex(next_x, next_y);
-            // Check if already visited
-            if(visited_ids[next_id])
-                continue;
-            unsigned int cost = costmap->getCost(next_id);
-            // Check if wall, lethal or unknown (we don't want unknown space travel)
-            if (cost >= max_costmap_val_)
+            const int next_x = static_cast<int>(mx) + dx[i];
+            const int next_y = static_cast<int>(my) + dy[i];
+
+            if (next_x < 0 || next_y < 0 ||
+                next_x >= static_cast<int>(width) || next_y >= static_cast<int>(height))
             {
-                // We add it to already visited to speed up computation for future checks ?
-                visited_ids[next_id] = true;
                 continue;
             }
-            // Compute score: distance + path lenght
+
+            const int next_id = static_cast<int>(costmap->getIndex(
+                static_cast<unsigned int>(next_x),
+                static_cast<unsigned int>(next_y)));
+            const size_t next_idx = static_cast<size_t>(next_id);
+
+            if (closed[next_idx])
+            {
+                continue;
+            }
+
+            const unsigned int cost = costmap->getCost(
+                static_cast<unsigned int>(next_x),
+                static_cast<unsigned int>(next_y));
+            if (cost >= max_costmap_val_)
+            {
+                continue;
+            }
+
+            const double tentative_g = cell.path_lenght + costmap->getResolution();
+            if (tentative_g >= best_g[next_idx])
+            {
+                continue;
+            }
+
+            best_g[next_idx] = tentative_g;
+
             Cell next_cell;
             next_cell.id = next_id;
-            next_cell.path_lenght = cell.path_lenght + costmap->getResolution();
-            next_cell.score = std::hypot((int)start_mx - next_x, (int)start_my - next_y) + next_cell.path_lenght;
+            next_cell.path_lenght = tentative_g;
+            next_cell.score = tentative_g + std::hypot(
+                static_cast<double>(goal_mx) - static_cast<double>(next_x),
+                static_cast<double>(goal_my) - static_cast<double>(next_y));
             q.push(next_cell);
-            visited_ids[next_id] = true;
         }
     }
+
     return false;
 }
 
@@ -484,6 +621,25 @@ CallbackReturn planner::on_configure(const rclcpp_lifecycle::State & state)
 {
     RCLCPP_INFO(get_logger(), "Configuring... %s", state.label().c_str());
     // TODO: get parameters
+    base_frame_ = this->get_parameter("base_frame").as_string();
+    costmap_topic_name_ = this->get_parameter("costmap_topic_name").as_string();
+    contours_topic_name_ = this->get_parameter("contours_topic_name").as_string();
+    robot_radius_ = this->get_parameter("robot_radius").as_double();
+    max_costmap_val_ = static_cast<unsigned int>(this->get_parameter("max_costmap_val").as_int());
+    dist_threshold_ = this->get_parameter("dist_threshold").as_double();
+    enable_window_tangent_orientation_ = this->get_parameter("enable_window_tangent_orientation").as_bool();
+    orientation_window_size_ = this->get_parameter("orientation_window_size").as_int();
+    orientation_object_weight_ = this->get_parameter("orientation_object_weight").as_double();
+    orientation_contour_normal_weight_ = this->get_parameter("orientation_contour_normal_weight").as_double();
+    orientation_face_tolerance_deg_ = this->get_parameter("orientation_face_tolerance_deg").as_double();
+    orientation_perp_tolerance_deg_ = this->get_parameter("orientation_perp_tolerance_deg").as_double();
+
+    if (orientation_window_size_ < 1)
+    {
+        orientation_window_size_ = 1;
+        RCLCPP_WARN(this->get_logger(), "orientation_window_size must be >= 1. Clamping to 1.");
+    }
+
     state_ = 0; // 0 standby : 1 navigating
     //Action Client
     nav_callback_group_ = create_callback_group(
