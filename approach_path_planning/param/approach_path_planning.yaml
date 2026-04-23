@@ -14,3 +14,8 @@ approach_planner:
     orientation_contour_normal_weight: 0.3
     orientation_face_tolerance_deg: 40.0
     orientation_perp_tolerance_deg: 40.0
+
+    # Goal footprint clearance check.
+    # If radius is -1, it is computed from robot_radius / costmap_resolution.
+    enable_goal_clearance_check: true
+    goal_clearance_radius_cells: 5

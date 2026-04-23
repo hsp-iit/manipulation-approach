@@ -18,7 +18,7 @@ using namespace std::chrono_literals;
 
 namespace approach_path_planning{
 
-class planner : public rclcpp_lifecycle::LifecycleNode 
+class planner : public rclcpp_lifecycle::LifecycleNode
 {
 private:
     class Cell
@@ -50,6 +50,8 @@ private:
     double orientation_contour_normal_weight_;
     double orientation_face_tolerance_deg_;
     double orientation_perp_tolerance_deg_;
+    bool enable_goal_clearance_check_;
+    int goal_clearance_radius_cells_;
 
     // ------------ Action client vars:
     rclcpp_action::Client<nav2_msgs::action::NavigateToPose>::SharedPtr nav_client_;
@@ -84,6 +86,10 @@ private:
     void contours_update(surface_detector_interfaces::msg::DetectionResults::SharedPtr msg);
     // ------------ Functions
     bool findNearestFreeCell(int mx, int my, int& out_x, int& out_y, int radius);
+    bool isCellNeighborhoodFree(const nav2_costmap_2d::Costmap2D* costmap,
+                                unsigned int mx,
+                                unsigned int my,
+                                int radius_cells) const;
     double signedArea(const std::vector<geometry_msgs::msg::PointStamped>& poly);
     bool generateMarkerMsg(std::vector<Eigen::Vector3d> poses,
                             visualization_msgs::msg::Marker &msg_out,
@@ -91,8 +97,8 @@ private:
                             Eigen::Vector3d rgb,
                             std::string frame_id = "map",
                             double z_height = 0.2);
-    bool isReachableAstar(nav2_costmap_2d::Costmap2D* costmap, 
-                     unsigned int start_mx, unsigned int start_my, 
+    bool isReachableAstar(nav2_costmap_2d::Costmap2D* costmap,
+                     unsigned int start_mx, unsigned int start_my,
                      unsigned int goal_mx, unsigned int goal_my);
 public:
     planner(const rclcpp::NodeOptions & options);
@@ -103,6 +109,6 @@ public:
     CallbackReturn on_shutdown(const rclcpp_lifecycle::State & state);
     CallbackReturn on_error(const rclcpp_lifecycle::State & state);
     CallbackReturn on_cleanup(const rclcpp_lifecycle::State & state);
-    
+
 };
 }
