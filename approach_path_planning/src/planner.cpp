@@ -370,8 +370,8 @@ bool planner::isReachableAstar(nav2_costmap_2d::Costmap2D* costmap,
             int next_x = (int)mx + dx[i];
             int next_y = (int)my + dy[i];
             // Out of map bounds
-            if (next_x > width || next_x < 0 || 
-                next_y > height || next_y < 0)
+            if (next_x >= (int)width || next_x < 0 || 
+                next_y >= (int)height || next_y < 0)
                 continue;
             int next_id = costmap->getIndex(next_x, next_y);
             // Check if already visited
@@ -426,8 +426,8 @@ bool planner::findNearestFreeCell(int map_x, int map_y, int& out_x, int& out_y, 
             int near_x = map_x + dx;
             int near_y = map_y + dy;
             // Check bounds
-            if(near_x > global_costmap_.getSizeInCellsX() or near_x < 0) continue;
-            if(near_y > global_costmap_.getSizeInCellsY() or near_y < 0) continue;
+            if(near_x >= (int)global_costmap_.getSizeInCellsX() or near_x < 0) continue;
+            if(near_y >= (int)global_costmap_.getSizeInCellsY() or near_y < 0) continue;
 
             unsigned char c = global_costmap_.getCost(near_x, near_y);
             // find the minimum cost

@@ -70,14 +70,14 @@ def numpy_to_pc2_msg(pointcloud: np.ndarray, color: np.ndarray, header):
     fields = [PointField(name=n, offset=i*itemsize, datatype=ros_dtype, count=1) for i, n in enumerate('xyzrgb')]
     nbytes = 6
     xyzrgb = np.array(np.hstack([pointcloud, color/255]), dtype=np.float32)
-    pc2_msg = PointCloud2(header=header, 
-                      height = 1, 
-                      width= pointcloud.shape[0], 
-                      fields=fields, 
-                      is_dense= False, 
-                      is_bigedian=False, 
-                      point_step=(itemsize * nbytes), 
-                      row_step = (itemsize * nbytes * pointcloud.shape[0]), 
+    pc2_msg = PointCloud2(header=header,
+                      height = 1,
+                      width= pointcloud.shape[0],
+                      fields=fields,
+                      is_dense= False,
+                      is_bigendian=False,
+                      point_step=(itemsize * nbytes),
+                      row_step = (itemsize * nbytes * pointcloud.shape[0]),
                       data=xyzrgb.tobytes())
     return pc2_msg
 
@@ -141,19 +141,22 @@ def project_depth_to_pc_torch(depth : torch.Tensor, color_img : torch.Tensor, ca
     if max_depth < 0.0:
           max_depth = 6.0
     if mask is None:
-        mask = np.ones_like(depth.shape(), dtype=np.uint8)
-    mask_torch = torch.tensor(mask, dtype=torch.uint8, device=depth.device)
+        mask_torch = torch.ones_like(depth, dtype=torch.uint8, device=depth.device)
+    else:
+        mask_torch = torch.as_tensor(mask, dtype=torch.uint8, device=depth.device)
+        if mask_torch.ndim == 3:
+            mask_torch = mask_torch[0]
 
     # filter depth coords based on z distance
     uu, vv = torch.where((depth > min_depth) & (depth < max_depth))
     full_zz = depth[uu, vv] / depth_factor
     full_xx = (vv - cx) * full_zz / fx
     full_yy = (uu - cy) * full_zz / fy
-    
-    zz = depth[uu, vv] * mask_torch[0][uu, vv] / depth_factor
+
+    zz = depth[uu, vv] * mask_torch[uu, vv] / depth_factor
     xx = (vv - cx) * zz / fx
     yy = (uu - cy) * zz / fy
-    
+
     condition = (xx != 0) & (yy != 0) & (zz != 0)
     xx = xx[condition]
     yy = yy[condition]
@@ -174,25 +177,25 @@ def project_depth_to_pc_torch(depth : torch.Tensor, color_img : torch.Tensor, ca
     fields = [PointField(name=n, offset=i*itemsize, datatype=ros_dtype, count=1) for i, n in enumerate('xyzrgb')]
     nbytes = 6
     xyzrgb = np.array(np.hstack([pointcloud, color_cpu/255]), dtype=np.float32)
-    msg = PointCloud2(header=header, 
-                      height = 1, 
-                      width= pointcloud.shape[0], 
-                      fields=fields, 
-                      is_dense= False, 
-                      is_bigedian=False, 
-                      point_step=(itemsize * nbytes), 
-                      row_step = (itemsize * nbytes * pointcloud.shape[0]), 
+    msg = PointCloud2(header=header,
+                      height = 1,
+                      width= pointcloud.shape[0],
+                      fields=fields,
+                      is_dense= False,
+                      is_bigendian=False,
+                      point_step=(itemsize * nbytes),
+                      row_step = (itemsize * nbytes * pointcloud.shape[0]),
                       data=xyzrgb.tobytes())
-    
+
     full_xyzrgb = np.array(np.hstack([full_pointcloud, full_color_cpu/255]), dtype=np.float32)
-    full_msg = PointCloud2(header=header, 
-                      height = 1, 
-                      width= full_pointcloud.shape[0], 
-                      fields=fields, 
-                      is_dense= False, 
-                      is_bigedian=False, 
-                      point_step=(itemsize * nbytes), 
-                      row_step = (itemsize * nbytes * full_pointcloud.shape[0]), 
+    full_msg = PointCloud2(header=header,
+                      height = 1,
+                      width= full_pointcloud.shape[0],
+                      fields=fields,
+                      is_dense= False,
+                      is_bigendian=False,
+                      point_step=(itemsize * nbytes),
+                      row_step = (itemsize * nbytes * full_pointcloud.shape[0]),
                       data=full_xyzrgb.tobytes())
 
     return msg, full_msg

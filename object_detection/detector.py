@@ -35,7 +35,7 @@ from surface_detector_interfaces.action import ReachObject
 
 import utils
 
-class ObjectDetector(Node): 
+class ObjectDetector(Node):
     def __init__(self):
         super().__init__("object_detector")
         ### ROS2 Param declaration
@@ -77,10 +77,11 @@ class ObjectDetector(Node):
         self.device = "cuda"
         self.feedback_dist = 0.0
         self.navigation_start_timeout = 20.0
+        self.goal_status = GoalStatus.STATUS_UNKNOWN
 
         self.get_logger().info(f'Using parameters: {img_topic=}  {depth_topic=}  {use_camera_info_topic=}  {camera_info_topic=} \n'
                                f'{self.object_pointcloud_topic=}  {self.robot_base_frame=}')
-        
+
         self.cb_grp = ReentrantCallbackGroup()
 
         # Enable camera info subscriber or load params
@@ -96,7 +97,7 @@ class ObjectDetector(Node):
         else:
             self.calib_mat = np.array(self.get_parameter('cam_calib_mat').value).reshape((3, 3))
             self.camera_info_available = True
-        
+
         ### tf2
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -104,7 +105,7 @@ class ObjectDetector(Node):
         ### ROS2 subscribers
         self.img_sub = message_filters.Subscriber(self, Image, img_topic)
         self.depth_sub = message_filters.Subscriber(self, Image, depth_topic)
-        self.tss = message_filters.ApproximateTimeSynchronizer([self.img_sub, self.depth_sub], 1, slop=0.1)   
+        self.tss = message_filters.ApproximateTimeSynchronizer([self.img_sub, self.depth_sub], 1, slop=0.1)
         self.tss.registerCallback(self.camera_callback)
         # Publishers
         self.object_pointcloud_pub = self.create_publisher(PointCloud2, self.get_name() + "/" + self.object_pointcloud_topic, 10)
@@ -116,7 +117,7 @@ class ObjectDetector(Node):
         #self.segment_object_srv = self.create_service(SegmentObject, self.get_name() + "/object_to_find", self.object_to_find)
 
         # DINO model : TODO set params for DINO configs path
-        self.dino_model = load_model("/home/user1/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py", 
+        self.dino_model = load_model("/home/user1/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py",
                                      "/home/user1/GroundingDINO/weights/groundingdino_swint_ogc.pth")
         # Annotated img pub (debug only)
         self.annotated_img_pub = self.create_publisher(Image, "/annotated_dino_img", 10)
@@ -124,9 +125,9 @@ class ObjectDetector(Node):
         self.sam = SAM("sam2.1_l.pt")
         self.annotated_sam_pub = self.create_publisher(Image, "/sam_mask_img", 10)  # for debug
         # Action server
-        self.reach_object_action_server = ActionServer(self, action_type=ReachObject, 
-                                                       action_name="/reach_object", 
-                                                       execute_callback=self.reach_object_callback, 
+        self.reach_object_action_server = ActionServer(self, action_type=ReachObject,
+                                                       action_name="/reach_object",
+                                                       execute_callback=self.reach_object_callback,
                                                        callback_group=self.cb_grp)
         self.nav_feedback_sub = self.create_subscription(NavigateToPose_FeedbackMessage, "navigate_to_pose/_action/feedback", self.feedback_sub, 10, callback_group=self.cb_grp)
         self.nav_status_sub = self.create_subscription(GoalStatusArray, "navigate_to_pose/_action/status", self.goal_status_cbk, 10, callback_group=self.cb_grp)
@@ -165,8 +166,8 @@ class ObjectDetector(Node):
         )
         # Debug pub
         annotated_frame = annotate(image_source=rgb, boxes=boxes, logits=logits, phrases=phrases)
-        debug_img_msg = utils.numpy_to_ros2_image(annotated_frame, 
-                                                                   img_msg.header.stamp, 
+        debug_img_msg = utils.numpy_to_ros2_image(annotated_frame,
+                                                                   img_msg.header.stamp,
                                                                    img_msg.header.frame_id)
         self.annotated_img_pub.publish(debug_img_msg)
 
@@ -190,18 +191,18 @@ class ObjectDetector(Node):
             for c in range(3):
                 colored_mask[:, :, c] = mask * color_red[c]
             overlay = cv2.addWeighted(overlay, 1.0, colored_mask, 0.5, 0)
-            sam_img = utils.numpy_to_ros2_image(overlay, 
-                                                                 img_msg.header.stamp, 
-                                                                 img_msg.header.frame_id, 
+            sam_img = utils.numpy_to_ros2_image(overlay,
+                                                                 img_msg.header.stamp,
+                                                                 img_msg.header.frame_id,
                                                                  encoding = 'rgb8')
             self.annotated_sam_pub.publish(sam_img)
             # Convert to pointcloud2
-            pc_msg, full_pc_msg = utils.project_depth_to_pc_torch(depth_torch, 
-                                                                                   rgb_torch, 
-                                                                                   self.calib_mat, 
-                                                                                   self.camera_reference_frame, 
-                                                                                   depth_msg.header.stamp, 
-                                                                                   mask=mask, 
+            pc_msg, full_pc_msg = utils.project_depth_to_pc_torch(depth_torch,
+                                                                                   rgb_torch,
+                                                                                   self.calib_mat,
+                                                                                   self.camera_reference_frame,
+                                                                                   depth_msg.header.stamp,
+                                                                                   mask=mask,
                                                                                    max_depth=3.0)
             self.object_pointcloud_pub.publish(pc_msg)
             self.full_pointcloud_pub.publish(full_pc_msg)
@@ -225,7 +226,8 @@ class ObjectDetector(Node):
         feedback_msg = ReachObject.Feedback()
         self.get_logger().info(f"Received request to reach object {goal_handle.request.object_string}")
         self.object_string = goal_handle.request.object_string
-        
+        self.goal_status = GoalStatus.STATUS_UNKNOWN
+
         # Enable other nodes? -> TODO think how to do it (probably using srv, but it's an optional feature)
 
         # Wait for the navigation to start
@@ -233,6 +235,7 @@ class ObjectDetector(Node):
         while (self.goal_status != GoalStatus.STATUS_EXECUTING and (time.time() - start_wait_time) <= self.navigation_start_timeout):
             await asyncio.sleep(0.2)
             if goal_handle.is_cancel_requested:
+                self.object_string = ""
                 goal_handle.canceled()
                 result = ReachObject.Result()
                 result.reached = False
@@ -240,7 +243,8 @@ class ObjectDetector(Node):
                 return result
         # Timeout condition
         if (time.time() - start_wait_time) > self.navigation_start_timeout:
-            goal_handle.canceled()
+            self.object_string = ""
+            goal_handle.abort()
             result = ReachObject.Result()
             result.reached = False
             result.error_msg = "Timeout while starting the approach pipeline untill navigation"
@@ -249,6 +253,7 @@ class ObjectDetector(Node):
         while (self.goal_status == GoalStatus.STATUS_EXECUTING):
             await asyncio.sleep(0.2)
             if goal_handle.is_cancel_requested:
+                self.object_string = ""
                 goal_handle.canceled()
                 result = ReachObject.Result()
                 result.reached = False
@@ -267,9 +272,9 @@ class ObjectDetector(Node):
         else:
             result.reached = False
             result.error_msg = f"Goal failed with status: {self.goal_status}"
-            goal_handle.canceled()  # Cancel action
+            goal_handle.abort()
         return result
-    
+
     #def object_to_find(self, request : SegmentObject.Request, response : SegmentObject.Response):
     #    if request.object_string is not None:
     #        self.object_string = request.object_string
@@ -282,13 +287,16 @@ class ObjectDetector(Node):
     #        response.is_ok = False
     #        response.error_msg = f"[object_to_find] None object received as: {request.object_string=}"
     #        self.get_logger().error(response.error_msg)
-    #    
+    #
     #    return response
-    
+
     def feedback_sub(self, msg : NavigateToPose_FeedbackMessage):
         self.feedback_dist = msg.feedback.distance_remaining
 
     def goal_status_cbk(self, msg : GoalStatusArray):
+        if len(msg.status_list) == 0:
+            self.goal_status = GoalStatus.STATUS_UNKNOWN
+            return
         # We take the status of the last goal
         self.goal_status = msg.status_list[-1].status
         ## Values:
