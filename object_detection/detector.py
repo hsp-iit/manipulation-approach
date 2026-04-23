@@ -25,7 +25,6 @@ from action_msgs.msg._goal_status import GoalStatus
 from sensor_msgs.msg import PointCloud2, CameraInfo, Image
 from visualization_msgs.msg import MarkerArray
 from tf2_ros import TransformListener, Buffer
-import asyncio
 
 import message_filters
 from ultralytics import SAM
@@ -222,7 +221,7 @@ class ObjectDetector(Node):
             self.calib_mat = np.array(msg.k, dtype=np.float32).reshape((3, 3))
             self.camera_info_available = True
 
-    async def reach_object_callback(self, goal_handle : ServerGoalHandle):
+    def reach_object_callback(self, goal_handle : ServerGoalHandle):
         feedback_msg = ReachObject.Feedback()
         self.get_logger().info(f"Received request to reach object {goal_handle.request.object_string}")
         self.object_string = goal_handle.request.object_string
@@ -233,7 +232,7 @@ class ObjectDetector(Node):
         # Wait for the navigation to start
         start_wait_time = time.time()
         while (self.goal_status != GoalStatus.STATUS_EXECUTING and (time.time() - start_wait_time) <= self.navigation_start_timeout):
-            await asyncio.sleep(0.2)
+            time.sleep(0.2)
             if goal_handle.is_cancel_requested:
                 self.object_string = ""
                 goal_handle.canceled()
@@ -251,7 +250,7 @@ class ObjectDetector(Node):
             return result
         # Navigation started -> Now wait for it's end
         while (self.goal_status == GoalStatus.STATUS_EXECUTING):
-            await asyncio.sleep(0.2)
+            time.sleep(0.2)
             if goal_handle.is_cancel_requested:
                 self.object_string = ""
                 goal_handle.canceled()
@@ -274,21 +273,6 @@ class ObjectDetector(Node):
             result.error_msg = f"Goal failed with status: {self.goal_status}"
             goal_handle.abort()
         return result
-
-    #def object_to_find(self, request : SegmentObject.Request, response : SegmentObject.Response):
-    #    if request.object_string is not None:
-    #        self.object_string = request.object_string
-    #        response.is_ok = True
-    #        if self.object_string == "":
-    #            self.get_logger().info("[object_to_find] Received empty string. Stopping looking for objects")
-    #        else:
-    #            self.get_logger().info(f"[object_to_find] Looking for object {self.object_string=}")
-    #    else:
-    #        response.is_ok = False
-    #        response.error_msg = f"[object_to_find] None object received as: {request.object_string=}"
-    #        self.get_logger().error(response.error_msg)
-    #
-    #    return response
 
     def feedback_sub(self, msg : NavigateToPose_FeedbackMessage):
         self.feedback_dist = msg.feedback.distance_remaining
