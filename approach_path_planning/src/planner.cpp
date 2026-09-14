@@ -3,6 +3,7 @@
 // Author: Simone Micheletti
 #include "approach_path_planning/planner.hpp"
 #include "geometry_msgs/msg/point_stamped.hpp"
+#include "nav2_costmap_2d/cost_values.hpp"
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <tf2/transform_datatypes.h>
 #include <tf2/LinearMath/Quaternion.h>
@@ -21,6 +22,7 @@ rclcpp_lifecycle::LifecycleNode("approach_planner_node", options)
     this->declare_parameter<std::string>("contours_topic_name", "/surface_detector/results");
     this->declare_parameter<std::string>("goal_topic_name", "/approach_planner/goal_pose");
     this->declare_parameter<double>("robot_radius", 0.2);
+    this->declare_parameter<double>("goal_edge_margin", 0.05);
     this->declare_parameter<int>("max_costmap_val", 253);
     this->declare_parameter<double>("dist_threshold", 0.6);
     this->declare_parameter<bool>("enable_window_tangent_orientation", true);
@@ -37,6 +39,7 @@ rclcpp_lifecycle::LifecycleNode("approach_planner_node", options)
     contours_topic_name_ = "/surface_detector/results";
     goal_topic_name_ = "/approach_planner/goal_pose";
     robot_radius_ = 0.2;
+    goal_edge_margin_ = 0.05;
     buffer_ = std::make_unique<tf2_ros::Buffer>(this->get_clock());
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*buffer_);
     costmap_received_ = false;
@@ -94,7 +97,7 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
             transformed_contours[i] = buffer_->transform(contours_points[i], "map");
         }
         transformed_pose = buffer_->transform(object_pose, "map");
-        auto robot_tf = buffer_->lookupTransform("map", object_pose.header.frame_id, object_pose.header.stamp);
+        auto robot_tf = buffer_->lookupTransform("map", base_frame_, object_pose.header.stamp);
         robot_pose.header = robot_tf.header;
         robot_pose.point.x = robot_tf.transform.translation.x;
         robot_pose.point.y = robot_tf.transform.translation.y;
@@ -119,11 +122,9 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
     Eigen::Vector2d robot_pose_eigen (robot_pose.point.x, robot_pose.point.y);
     std::vector<Eigen::Vector3d> candidate_goals;    // X, Y, Theta
     candidate_goals.reserve(L);
-    double min_dist;
     Eigen::Vector2d P;
     P[0] = transformed_pose.point.x;
     P[1] = transformed_pose.point.y;
-    Eigen::Vector2d closest_point_to_obj;
     double area = planner::signedArea(transformed_contours);
 
     for (size_t i = 0; i < L; i++)
@@ -150,41 +151,15 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
             AB[1] = B[1] - A[1];
         }
         double segment_length_sq = AB.squaredNorm();
-        // Check if A==B
+        // Skip degenerate segments (A==B), e.g. the closing point of the contour: they have no normal
         if (segment_length_sq <= 1e-12)
         {
-            double distance_squared = (A - P).squaredNorm();
-            approach_point_vec[i] = A;  // save the closest point to P (A=B)
-            if (i == 0)
-            {
-                min_dist = distance_squared;
-                closest_point_to_obj = A;
-            }
-            else if (distance_squared < min_dist)
-            {
-                min_dist = distance_squared;
-                closest_point_to_obj = A;
-            }
+            continue;
         }
-        else
-        {
-            Eigen::Vector2d C;   // closest point to P
-            double t = (P - A).dot(AB) / segment_length_sq;
-            t = std::clamp(t, 0.0, 1.0);
-            C = A + t * AB;
-            approach_point_vec[i] = C;  // save it
-            double distance_squared = (C - P).squaredNorm();
-            if (i == 0)
-            {
-                min_dist = distance_squared;
-                closest_point_to_obj = C;
-            }
-            else if (distance_squared < min_dist)
-            {
-                min_dist = distance_squared;
-                closest_point_to_obj = C;
-            }
-        }
+        // Closest point to P on the segment
+        double t = (P - A).dot(AB) / segment_length_sq;
+        t = std::clamp(t, 0.0, 1.0);
+        approach_point_vec[i] = A + t * AB;  // save it
         // Check outward normal for the segment AB
         AB.normalize();
         // Two candidate normals
@@ -192,7 +167,7 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
         Eigen::Vector2d normal_right( AB.y(), -AB.x());
         Eigen::Vector2d outward_normal = (area >= 0 ? normal_right : normal_left);
         // For keeping things simple: we compute points outside the contours by a fixed offset (based on the robot radius)
-        Eigen::Vector2d pose_xy = approach_point_vec[i] + outward_normal.normalized() * robot_radius_;
+        Eigen::Vector2d pose_xy = approach_point_vec[i] + outward_normal.normalized() * (robot_radius_ + goal_edge_margin_);
 
         // Orientation logic: face object while staying mostly perpendicular to local contour.
         double theta = std::atan2(-outward_normal.y(), -outward_normal.x());
@@ -288,6 +263,9 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
     auto start = this->get_clock()->now();
     int costmap_search_radius = 2; // Since resolution is 5cm, we look in a neighbourhood of 10 cm of an occupied candidate goal.
     std::vector<Eigen::Vector3d> filtered_goals;
+    // Candidates passing the local checks, and their costmap cells (reachability is checked later for all of them)
+    std::vector<Eigen::Vector3d> local_goals;
+    std::vector<unsigned int> local_goal_cells;
     //std::vector<unsigned char> goal_cells_cost;
     // Robot pose in grid coords
     unsigned int r_grid_x, r_grid_y;
@@ -331,15 +309,10 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
                 {
                     continue;
                 }
-                // Check if planner can reach it
-                if (!isReachableAstar(&global_costmap_, r_grid_x, r_grid_y, closest_x, closest_y))
-                {
-                    RCLCPP_INFO(this->get_logger(), "Goal not reachable, skipping.");
-                    continue;
-                }
-
                 // We save the valid candidates
-                filtered_goals.push_back(Eigen::Vector3d(world_x, world_y, theta));
+                local_goals.push_back(Eigen::Vector3d(world_x, world_y, theta));
+                local_goal_cells.push_back(global_costmap_.getIndex(static_cast<unsigned int>(closest_x),
+                                                                    static_cast<unsigned int>(closest_y)));
             }
         }
         else
@@ -356,16 +329,24 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
             {
                 continue;
             }
-            // Check if planner can reach it
-            if (!isReachableAstar(&global_costmap_, r_grid_x, r_grid_y, grid_x, grid_y))
-            {
-                RCLCPP_INFO(this->get_logger(), "Goal not reachable, skipping.");
-                continue;
-            }
             // Save the original
-            filtered_goals.push_back(Eigen::Vector3d(x, y, theta));
+            local_goals.push_back(Eigen::Vector3d(x, y, theta));
+            local_goal_cells.push_back(global_costmap_.getIndex(grid_x, grid_y));
         }
         //goal_cells_cost.push_back(cost); // We could need it in the future for heuristic expansion
+    }
+    // Check if the robot can reach them: a single search from the robot cell for all the candidates
+    std::vector<bool> reachable = computeReachableCells(&global_costmap_, r_grid_x, r_grid_y, local_goal_cells);
+    for (size_t i = 0; i < local_goals.size(); ++i)
+    {
+        if (reachable[local_goal_cells[i]])
+        {
+            filtered_goals.push_back(local_goals[i]);
+        }
+    }
+    if (filtered_goals.size() < local_goals.size())
+    {
+        RCLCPP_INFO_STREAM(get_logger(), "Skipped " << local_goals.size() - filtered_goals.size() << " unreachable goal candidates");
     }
     // Check if we found at least one valid candidate
     if (filtered_goals.size() < 1)
@@ -439,71 +420,59 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
     }
 }
 
-bool planner::isReachableAstar(nav2_costmap_2d::Costmap2D* costmap,
-                               unsigned int start_mx, unsigned int start_my,
-                               unsigned int goal_mx, unsigned int goal_my)
+std::vector<bool> planner::computeReachableCells(const nav2_costmap_2d::Costmap2D* costmap,
+                                                 unsigned int start_mx, unsigned int start_my,
+                                                 const std::vector<unsigned int>& target_cells) const
 {
     const unsigned int width = costmap->getSizeInCellsX();
     const unsigned int height = costmap->getSizeInCellsY();
+    const size_t map_size = static_cast<size_t>(width) * static_cast<size_t>(height);
+    std::vector<bool> reached(map_size, false);
 
     // Basic bounds sanity checks
-    if (start_mx >= width || start_my >= height || goal_mx >= width || goal_my >= height)
+    if (start_mx >= width || start_my >= height)
     {
-        return false;
+        return reached;
     }
 
-    const unsigned int start_cost = costmap->getCost(start_mx, start_my);
-    const unsigned int goal_cost = costmap->getCost(goal_mx, goal_my);
-    // Reject if start/goal are in occupied or unknown cells
-    if (start_cost >= max_costmap_val_ || goal_cost >= max_costmap_val_)
+    // Count the targets, to stop the search once they are all reached
+    std::vector<bool> is_target(map_size, false);
+    size_t targets_left = 0;
+    for (const auto & cell : target_cells)
     {
-        return false;
+        if (cell < map_size && !is_target[cell])
+        {
+            is_target[cell] = true;
+            ++targets_left;
+        }
     }
 
-    const int start_id = static_cast<int>(costmap->getIndex(start_mx, start_my));
-    const int goal_id = static_cast<int>(costmap->getIndex(goal_mx, goal_my));
+    // Near the start, inflated and unknown cells are traversable too (lethal ones are not):
+    // the robot must be able to leave the inflation when it's already close to an obstacle
+    const double escape_radius = robot_radius_ / costmap->getResolution();
+    const double escape_radius_sq = escape_radius * escape_radius;
 
-    // Queue containing all the cells to evaluate (lower score first)
-    std::priority_queue<Cell, std::vector<Cell>, std::greater<Cell>> q;
+    const int dx[] = {0, 0, 1, -1};
+    const int dy[] = {-1, 1, 0, 0};
 
-    Cell start_cell;
-    start_cell.id = start_id;
-    start_cell.path_lenght = 0.0;
-    start_cell.score = std::hypot(static_cast<double>(goal_mx) - static_cast<double>(start_mx),
-                                  static_cast<double>(goal_my) - static_cast<double>(start_my));
-    q.push(start_cell);
-
-    const std::vector<int> dx = {0, 0, 1, -1};
-    const std::vector<int> dy = {-1, 1, 0, 0};
-
-    const size_t map_size = static_cast<size_t>(width) * static_cast<size_t>(height);
-    std::vector<bool> closed(map_size, false);
-    std::vector<double> best_g(map_size, std::numeric_limits<double>::infinity());
-    best_g[static_cast<size_t>(start_id)] = 0.0;
-
-    // A* search loop
-    while (!q.empty())
+    const unsigned int start_id = costmap->getIndex(start_mx, start_my);
+    reached[start_id] = true;
+    if (is_target[start_id])
     {
-        Cell cell = q.top();
+        --targets_left;
+    }
+    std::queue<unsigned int> q;
+    q.push(start_id);
+
+    // Breadth first search (4-connected)
+    while (!q.empty() && targets_left > 0)
+    {
+        unsigned int mx, my;
+        costmap->indexToCells(q.front(), mx, my);
         q.pop();
 
-        const size_t cell_idx = static_cast<size_t>(cell.id);
-        if (closed[cell_idx])
-        {
-            continue;
-        }
-        closed[cell_idx] = true;
-
-        if (cell.id == goal_id)
-        {
-            return true;
-        }
-
-        unsigned int mx, my;
-        costmap->indexToCells(cell.id, mx, my);
-
         // Expand neighbors
-        for (size_t i = 0; i < dx.size(); ++i)
+        for (size_t i = 0; i < 4; ++i)
         {
             const int next_x = static_cast<int>(mx) + dx[i];
             const int next_y = static_cast<int>(my) + dy[i];
@@ -514,43 +483,36 @@ bool planner::isReachableAstar(nav2_costmap_2d::Costmap2D* costmap,
                 continue;
             }
 
-            const int next_id = static_cast<int>(costmap->getIndex(
-                static_cast<unsigned int>(next_x),
-                static_cast<unsigned int>(next_y)));
-            const size_t next_idx = static_cast<size_t>(next_id);
-
-            if (closed[next_idx])
+            const unsigned int next_id = costmap->getIndex(static_cast<unsigned int>(next_x),
+                                                           static_cast<unsigned int>(next_y));
+            if (reached[next_id])
             {
                 continue;
             }
 
-            const unsigned int cost = costmap->getCost(
-                static_cast<unsigned int>(next_x),
-                static_cast<unsigned int>(next_y));
-            if (cost >= max_costmap_val_)
+            const unsigned int cost = costmap->getCost(next_id);
+            bool traversable = cost < max_costmap_val_;
+            if (!traversable && cost != nav2_costmap_2d::LETHAL_OBSTACLE)
+            {
+                const double start_dx = next_x - static_cast<int>(start_mx);
+                const double start_dy = next_y - static_cast<int>(start_my);
+                traversable = start_dx * start_dx + start_dy * start_dy <= escape_radius_sq;
+            }
+            if (!traversable)
             {
                 continue;
             }
 
-            const double tentative_g = cell.path_lenght + costmap->getResolution();
-            if (tentative_g >= best_g[next_idx])
+            reached[next_id] = true;
+            if (is_target[next_id])
             {
-                continue;
+                --targets_left;
             }
-
-            best_g[next_idx] = tentative_g;
-
-            Cell next_cell;
-            next_cell.id = next_id;
-            next_cell.path_lenght = tentative_g;
-            next_cell.score = tentative_g + std::hypot(
-                static_cast<double>(goal_mx) - static_cast<double>(next_x),
-                static_cast<double>(goal_my) - static_cast<double>(next_y));
-            q.push(next_cell);
+            q.push(next_id);
         }
     }
 
-    return false;
+    return reached;
 }
 
 bool planner::isCellNeighborhoodFree(const nav2_costmap_2d::Costmap2D* costmap,
@@ -565,16 +527,22 @@ bool planner::isCellNeighborhoodFree(const nav2_costmap_2d::Costmap2D* costmap,
         return false;
     }
 
-    int effective_radius = radius_cells;
-    if (effective_radius < 0)
+    // Circular footprint, radius in cells
+    double radius = radius_cells;
+    if (radius < 0)
     {
-        effective_radius = std::max(1, static_cast<int>(std::ceil(robot_radius_ / costmap->getResolution())));
+        radius = std::max(1.0, robot_radius_ / costmap->getResolution());
     }
+    const int max_offset = static_cast<int>(std::ceil(radius));
 
-    for (int dx = -effective_radius; dx <= effective_radius; ++dx)
+    for (int dx = -max_offset; dx <= max_offset; ++dx)
     {
-        for (int dy = -effective_radius; dy <= effective_radius; ++dy)
+        for (int dy = -max_offset; dy <= max_offset; ++dy)
         {
+            if (dx * dx + dy * dy > radius * radius)
+            {
+                continue;
+            }
             const int nx = static_cast<int>(mx) + dx;
             const int ny = static_cast<int>(my) + dy;
 
@@ -586,7 +554,9 @@ bool planner::isCellNeighborhoodFree(const nav2_costmap_2d::Costmap2D* costmap,
 
             const unsigned int cost = costmap->getCost(static_cast<unsigned int>(nx),
                                                        static_cast<unsigned int>(ny));
-            if (cost >= max_costmap_val_)
+            // Only obstacles and unknown cells: inflated costs already include the (costmap) robot radius,
+            // rejecting them here would count the robot size twice
+            if (cost >= nav2_costmap_2d::LETHAL_OBSTACLE)
             {
                 return false;
             }
@@ -688,6 +658,7 @@ CallbackReturn planner::on_configure(const rclcpp_lifecycle::State & state)
     contours_topic_name_ = this->get_parameter("contours_topic_name").as_string();
     goal_topic_name_ = this->get_parameter("goal_topic_name").as_string();
     robot_radius_ = this->get_parameter("robot_radius").as_double();
+    goal_edge_margin_ = this->get_parameter("goal_edge_margin").as_double();
     max_costmap_val_ = static_cast<unsigned int>(this->get_parameter("max_costmap_val").as_int());
     dist_threshold_ = this->get_parameter("dist_threshold").as_double();
     enable_window_tangent_orientation_ = this->get_parameter("enable_window_tangent_orientation").as_bool();

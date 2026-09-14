@@ -120,7 +120,7 @@ void SurfaceDetector::cloud_callback(surface_detector_interfaces::msg::Segmented
     m_pass.filter(*in_cloud_filtered);
     if (in_cloud_filtered->points.size() == 0)
     {
-        RCLCPP_ERROR_STREAM(get_logger(), "Obtained an empty pc after heigh filtering with extremes: max: " << object_min_h << " min: " << object_min_h - 0.2);
+        RCLCPP_ERROR_STREAM(get_logger(), "Obtained an empty pc after heigh filtering with extremes: max: " << object_avg_h << " min: " << min_limit);
         return;
     }
     // Voxel grid filtering (downsampling)
@@ -188,21 +188,23 @@ void SurfaceDetector::cloud_callback(surface_detector_interfaces::msg::Segmented
         return;
     }
     RCLCPP_INFO(this->get_logger(), "Iterating clusters..");
-    // Convert clusters: find the one closer to the object
+    // Convert clusters: find the one closer to the object, i.e. containing the point closest to the object centre
+    // (the cluster centroid would favour small clusters over a big surface with the object far from its centre)
     auto min_dist = std::numeric_limits<double>::infinity();
-    pcl::Indices closer_cluster_ids;
+    const pcl::PointIndices * best_cluster = &cluster_ids.front();
     for (const auto& cluster : cluster_ids)
     {
-        Eigen::Vector4f centroid = Eigen::Vector4f::Zero();
-        pcl::compute3DCentroid(*plane_points, cluster.indices, centroid);
-        // Scoring closer clusters based on eucledian distance
-        double dist = (centroid.head<3>() - object_centre.head<3>()).norm();
-        if(dist < min_dist)
+        for (const auto& id : cluster.indices)
         {
-            min_dist = dist;
-            closer_cluster_ids = cluster.indices;
+            double dist = ((*plane_points)[id].getVector3fMap() - object_centre.head<3>()).squaredNorm();
+            if(dist < min_dist)
+            {
+                min_dist = dist;
+                best_cluster = &cluster;
+            }
         }
     }
+    const pcl::Indices & closer_cluster_ids = best_cluster->indices;
     // Convert to PC from ids
     pcl::PointCloud<pcl::PointXYZ>::Ptr closer_cluster = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
     pcl::copyPointCloud(*plane_points, closer_cluster_ids, *closer_cluster);
@@ -380,8 +382,9 @@ CallbackReturn SurfaceDetector::on_configure(const rclcpp_lifecycle::State &)
     m_height_pass.setFilterFieldName("z");
     m_grid.setLeafSize(m_voxel_size, m_voxel_size, m_voxel_size);
     m_seg.setOptimizeCoefficients(true);
-    m_seg.setModelType(pcl::SACMODEL_PARALLEL_PLANE);
-    m_seg.setAxis(Eigen::Vector3f::UnitX());  // Should be Z, but here we are in the camera frame
+    // Horizontal planes only: the normal must be along Z, since the cloud is in the reference frame (Z up)
+    m_seg.setModelType(pcl::SACMODEL_PERPENDICULAR_PLANE);
+    m_seg.setAxis(Eigen::Vector3f::UnitZ());
     m_seg.setEpsAngle(m_ransac_eps);  //0.087 -> 5deg
     m_seg.setMethodType(pcl::SAC_RANSAC);
     m_seg.setMaxIterations(200);

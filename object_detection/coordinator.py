@@ -5,7 +5,7 @@ import rclpy
 from rclpy.action import ActionClient, ActionServer, CancelResponse
 from rclpy.action.server import ServerGoalHandle
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
-from rclpy.executors import MultiThreadedExecutor
+from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
 
 from action_msgs.msg import GoalStatus
@@ -159,7 +159,13 @@ def main():
     node = ReachCoordinator()
     executor = MultiThreadedExecutor()
     executor.add_node(node)
-    executor.spin()
+    try:
+        executor.spin()
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.try_shutdown()
 
 
 if __name__ == "__main__":

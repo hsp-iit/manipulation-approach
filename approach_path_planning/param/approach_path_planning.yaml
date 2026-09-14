@@ -5,6 +5,8 @@ approach_planner:
     contours_topic_name: "/surface_detector/results"
     goal_topic_name: "/approach_planner/goal_pose"
     robot_radius: 0.2
+    # Goals are placed at robot_radius + goal_edge_margin from the surface contour
+    goal_edge_margin: 0.05
     max_costmap_val: 253
     dist_threshold: 0.6
 
@@ -16,7 +18,7 @@ approach_planner:
     orientation_face_tolerance_deg: 40.0
     orientation_perp_tolerance_deg: 40.0
 
-    # Goal footprint clearance check.
+    # Goal footprint clearance check: no lethal/unknown cell within this radius from the goal.
     # If radius is -1, it is computed from robot_radius / costmap_resolution.
     enable_goal_clearance_check: true
-    goal_clearance_radius_cells: 5
+    goal_clearance_radius_cells: -1

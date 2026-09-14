@@ -67,6 +67,14 @@ ros2 launch approach_path_planning approach_pipeline.launch.py
 ```
 It will also launch the visualization gui Rviz2.
 
+### 3- Tests
+---
+Integration test of the `/reach_object` action logic (detector + coordinator, with DINO/SAM stubbed and a fake Nav2 server):
+```
+python3 object_detection/test/test_reach.py
+```
+It runs on an isolated ROS domain (`ROS_DOMAIN_ID=87` by default, override with `REACH_TEST_DOMAIN_ID`), so it does not interfere with a running pipeline.
+
 ## Nodes Explaination
 
 ### 1- Plane Segmentation
@@ -111,6 +119,11 @@ Declared in `object_detection/detector.py` (set them with `--ros-args -p name:=v
 | `goal_update_min_distance` | `0.15` | A new approach goal preempts the current one only if it moved more than this (m)... |
 | `goal_update_min_angle_deg` | `10.0` | ...or if it rotated more than this (deg). |
 | `goal_update_min_interval` | `1.0` | Minimum time (s) between two goals sent to Nav2. |
+| `navigation_start_timeout` | `20.0` | Max time (s) from the request to the first approach goal accepted by Nav2. |
+| `dino_config_path` | `/home/user1/GroundingDINO/.../GroundingDINO_SwinT_OGC.py` | Grounding DINO model config. |
+| `dino_weights_path` | `/home/user1/GroundingDINO/weights/groundingdino_swint_ogc.pth` | Grounding DINO weights. |
+| `sam_model` | `sam2.1_l.pt` | SAM2 model (downloaded by ultralytics if missing). |
+| `camera_reference_frame` | `realsense_compensated` | Frame of the published pointclouds. If empty, the depth image frame is used. |
 
 Only one `/reach_object` request runs at a time. Cancelling the request (or its failure) also cancels the navigation goal.
 
@@ -124,6 +137,7 @@ Configured in `approach_path_planning/param/approach_path_planning.yaml`.
 | `contours_topic_name` | `/surface_detector/results` | Input topic with detected object + surface contours. |
 | `goal_topic_name` | `/approach_planner/goal_pose` | Output topic of the approach goal (forwarded to Nav2 by `object_detector`). |
 | `robot_radius` | `0.2` | Robot radius in meters used for candidate offsets and clearance checks. |
+| `goal_edge_margin` | `0.05` | Extra distance (m) of the candidates from the surface contour: offset = `robot_radius + goal_edge_margin`. |
 | `max_costmap_val` | `253` | Cost threshold considered non-traversable (`>=` this value is rejected). |
 | `dist_threshold` | `0.6` | Maximum distance (m) allowed between candidate goal and object for grasp feasibility. |
 | `enable_window_tangent_orientation` | `true` | Enables robust orientation computation from local contour window tangent. |
@@ -132,8 +146,8 @@ Configured in `approach_path_planning/param/approach_path_planning.yaml`.
 | `orientation_contour_normal_weight` | `0.3` | Weight for inward contour-normal direction in blended heading computation. |
 | `orientation_face_tolerance_deg` | `40.0` | Max angular tolerance (deg) for “facing the object” validation. |
 | `orientation_perp_tolerance_deg` | `40.0` | Max angular tolerance (deg) for “near-perpendicular to contour” validation. |
-| `enable_goal_clearance_check` | `true` | Enables neighborhood occupancy check around each goal cell. |
-| `goal_clearance_radius_cells` | `5` | Clearance radius in cells. If set to `-1`, it is auto-computed as `ceil(robot_radius / resolution)`. |
+| `enable_goal_clearance_check` | `true` | Rejects goals with a lethal or unknown costmap cell within the clearance radius (inflated cells are allowed, since the inflation already accounts for the robot size). |
+| `goal_clearance_radius_cells` | `-1` | Clearance radius in cells. If set to `-1`, it is auto-computed as `robot_radius / resolution`. |
 
 ### `surface_detector` parameters
 Configured in `surface_detection/param/surface_detector.yaml`.
@@ -145,7 +159,7 @@ Configured in `surface_detection/param/surface_detector.yaml`.
 | `min_cluster_size` | `200` | Minimum number of points for cluster extraction. |
 | `cluster_tolerance` | `0.05` | Euclidean cluster tolerance (meters). |
 | `height_offset` | `0.2` | Vertical offset used in surface/object extraction steps. |
-| `ransac_eps` | `0.2` | Epsilon/constraint parameter used in RANSAC stage. |
+| `ransac_eps` | `0.2` | Maximum tilt (rad) from horizontal of the plane fitted by RANSAC. |
 | `ransac_distance_threshold` | `0.03` | Inlier distance threshold (meters) for plane RANSAC. |
 | `thicken_ransac` | `true` | Enables thickening/expansion of RANSAC-selected support region. |
 | `delta_ransac_height` | `0.03` | Height delta used when `thicken_ransac` is enabled. |

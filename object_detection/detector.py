@@ -20,7 +20,7 @@ import rclpy
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
 from rclpy.action import ActionClient, ActionServer, CancelResponse, GoalResponse
 from rclpy.action.server import ServerGoalHandle
-from rclpy.executors import MultiThreadedExecutor
+from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.time import Time
 from action_msgs.msg import GoalStatus
@@ -61,7 +61,11 @@ class ObjectDetector(Node):
                 ('nav_server_wait_timeout', 5.0),
                 ('goal_update_min_distance', 0.15),     # [m] a new approach goal is sent to navigation only if it moved more than this
                 ('goal_update_min_angle_deg', 10.0),    # [deg] or if it rotated more than this
-                ('goal_update_min_interval', 1.0)       # [s] minimum time between two goals sent to navigation
+                ('goal_update_min_interval', 1.0),      # [s] minimum time between two goals sent to navigation
+                ('navigation_start_timeout', 20.0),     # [s] max time from the request to the first goal accepted by navigation
+                ('dino_config_path', "/home/user1/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py"),
+                ('dino_weights_path', "/home/user1/GroundingDINO/weights/groundingdino_swint_ogc.pth"),
+                ('sam_model', "sam2.1_l.pt")
                 ])
         # if self.object_string == "" we skip the callback
         self.object_string = ""
@@ -91,7 +95,7 @@ class ObjectDetector(Node):
         self.goal_update_min_angle = math.radians(self.get_parameter("goal_update_min_angle_deg").value)
         self.goal_update_min_interval = self.get_parameter("goal_update_min_interval").value
         self.device = "cuda"
-        self.navigation_start_timeout = 20.0
+        self.navigation_start_timeout = self.get_parameter("navigation_start_timeout").value
 
         # Request and navigation state, shared by the action server, camera and navigation callbacks
         self._lock = threading.Lock()
@@ -130,8 +134,9 @@ class ObjectDetector(Node):
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
         ### ROS2 subscribers
-        self.img_sub = message_filters.Subscriber(self, Image, img_topic)
-        self.depth_sub = message_filters.Subscriber(self, Image, depth_topic)
+        # Keep only the latest frame: inference is slower than the camera, so queued frames would be processed late
+        self.img_sub = message_filters.Subscriber(self, Image, img_topic, qos_profile=1)
+        self.depth_sub = message_filters.Subscriber(self, Image, depth_topic, qos_profile=1)
         self.tss = message_filters.ApproximateTimeSynchronizer([self.img_sub, self.depth_sub], 1, slop=0.1)
         self.tss.registerCallback(self.camera_callback)
         # Publishers
@@ -143,13 +148,13 @@ class ObjectDetector(Node):
         # Services
         #self.segment_object_srv = self.create_service(SegmentObject, self.get_name() + "/object_to_find", self.object_to_find)
 
-        # DINO model : TODO set params for DINO configs path
-        self.dino_model = load_model("/home/user1/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py",
-                                     "/home/user1/GroundingDINO/weights/groundingdino_swint_ogc.pth")
+        # DINO model
+        self.dino_model = load_model(self.get_parameter("dino_config_path").value,
+                                     self.get_parameter("dino_weights_path").value)
         # Annotated img pub (debug only)
         self.annotated_img_pub = self.create_publisher(Image, "/annotated_dino_img", 10)
         # SAM
-        self.sam = SAM("sam2.1_l.pt")
+        self.sam = SAM(self.get_parameter("sam_model").value)
         self.annotated_sam_pub = self.create_publisher(Image, "/sam_mask_img", 10)  # for debug
         # Action server
         self.reach_object_action_server = ActionServer(self, action_type=ReachObject,
@@ -235,10 +240,11 @@ class ObjectDetector(Node):
                                                                  encoding = 'rgb8')
             self.annotated_sam_pub.publish(sam_img)
             # Convert to pointcloud2
+            frame_id = self.camera_reference_frame if self.camera_reference_frame != "" else depth_msg.header.frame_id
             pc_msg, full_pc_msg = utils.project_depth_to_pc_torch(depth_torch,
                                                                                    rgb_torch,
                                                                                    self.calib_mat,
-                                                                                   self.camera_reference_frame,
+                                                                                   frame_id,
                                                                                    depth_msg.header.stamp,
                                                                                    mask=mask,
                                                                                    max_depth=3.0)
@@ -433,7 +439,13 @@ def main():
     exe = MultiThreadedExecutor()
     exe.add_node(node)
     print(f"Spinning Node {node.get_name()}")
-    exe.spin()
+    try:
+        exe.spin()
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.try_shutdown()
 
 if __name__ == "__main__":
     main()

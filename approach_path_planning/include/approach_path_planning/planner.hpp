@@ -20,17 +20,6 @@ namespace approach_path_planning{
 class planner : public rclcpp_lifecycle::LifecycleNode
 {
 private:
-    class Cell
-    {
-    public:
-        int id;
-        double score;
-        double path_lenght;
-        // We invert the direction because we want the minimum score to be on top of priority_queue
-        bool operator>(Cell a) const{
-            return this->score > a.score;;
-        };
-    };
     // ------------ Params
     std::string base_frame_;
     std::string costmap_topic_name_;
@@ -39,6 +28,8 @@ private:
     std::string goal_topic_name_;
     // TODO subscribe to robot footprint for extracting this param:
     double robot_radius_;
+    // Extra distance of the goal from the surface contour (goal offset = robot_radius_ + goal_edge_margin_)
+    double goal_edge_margin_;
     // Costmap value above which we consider it lethal
     unsigned int max_costmap_val_;
     // Maximum distance tolerated between the robot and the object to grasp
@@ -82,9 +73,10 @@ private:
                             Eigen::Vector3d rgb,
                             std::string frame_id = "map",
                             double z_height = 0.2);
-    bool isReachableAstar(nav2_costmap_2d::Costmap2D* costmap,
-                     unsigned int start_mx, unsigned int start_my,
-                     unsigned int goal_mx, unsigned int goal_my);
+    // Costmap cells reachable from the start cell. The search stops once all the target cells are reached
+    std::vector<bool> computeReachableCells(const nav2_costmap_2d::Costmap2D* costmap,
+                                           unsigned int start_mx, unsigned int start_my,
+                                           const std::vector<unsigned int>& target_cells) const;
 public:
     planner(const rclcpp::NodeOptions & options);
 
