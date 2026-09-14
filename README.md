@@ -90,7 +90,8 @@ ros2 launch approach_path_planning approach_planner.launch.py
 ```
 
 Subscribes to the topic `/surface_detector/results` and the costmap `/global_costmap/costmap_raw`.
-It publishes the desired goal (if any) on the topic: `/goal_pose`.
+It publishes the desired goal (if any) on the topic: `/approach_planner/goal_pose`.
+The goal is not sent to Nav2 directly: while a `/reach_object` request is running, the `object_detector` node forwards it to the `navigate_to_pose` action, skipping goals computed from frames older than the request and goals too similar to the last one sent (see the `object_detector` parameters below).
 Publishes also the following visualization/debug topics:
 - `/approach_planner/candidate_goals_marker`: Marker msg containing the possible poses outside the contour of the suface below the object to grasp
 - `/approach_planner/filtered_candidate_marker`: Marker msg that shows the poses from `/approach_planner/candidate_goals_marker` filtered in such a way that are reachable and in reach of the object to grasp.
@@ -98,6 +99,20 @@ Publishes also the following visualization/debug topics:
 ## Parameters Reference
 
 This section summarizes all runtime parameters currently used by the pipeline nodes in this repository.
+
+### `object_detector` navigation parameters
+Declared in `object_detection/detector.py` (set them with `--ros-args -p name:=value`).
+
+| Parameter | Default | Description |
+|---|---:|---|
+| `planner_goal_topic` | `/approach_planner/goal_pose` | Approach goals computed by the planner. |
+| `navigate_to_pose_action` | `navigate_to_pose` | Nav2 action used to reach the approach goal. |
+| `nav_server_wait_timeout` | `5.0` | Time (s) to wait for the Nav2 action server when a request starts. |
+| `goal_update_min_distance` | `0.15` | A new approach goal preempts the current one only if it moved more than this (m)... |
+| `goal_update_min_angle_deg` | `10.0` | ...or if it rotated more than this (deg). |
+| `goal_update_min_interval` | `1.0` | Minimum time (s) between two goals sent to Nav2. |
+
+Only one `/reach_object` request runs at a time. Cancelling the request (or its failure) also cancels the navigation goal.
 
 ### `approach_planner` parameters
 Configured in `approach_path_planning/param/approach_path_planning.yaml`.
@@ -107,6 +122,7 @@ Configured in `approach_path_planning/param/approach_path_planning.yaml`.
 | `base_frame` | `geometric_unicycle` | Robot base frame used by planner transforms/logic. |
 | `costmap_topic_name` | `/global_costmap/costmap_raw` | Topic used to subscribe to costmap data. |
 | `contours_topic_name` | `/surface_detector/results` | Input topic with detected object + surface contours. |
+| `goal_topic_name` | `/approach_planner/goal_pose` | Output topic of the approach goal (forwarded to Nav2 by `object_detector`). |
 | `robot_radius` | `0.2` | Robot radius in meters used for candidate offsets and clearance checks. |
 | `max_costmap_val` | `253` | Cost threshold considered non-traversable (`>=` this value is rejected). |
 | `dist_threshold` | `0.6` | Maximum distance (m) allowed between candidate goal and object for grasp feasibility. |

@@ -3,6 +3,7 @@ approach_planner:
     base_frame: "geometric_unicycle"
     costmap_topic_name: "/global_costmap/costmap_raw"
     contours_topic_name: "/surface_detector/results"
+    goal_topic_name: "/approach_planner/goal_pose"
     robot_radius: 0.2
     max_costmap_val: 253
     dist_threshold: 0.6

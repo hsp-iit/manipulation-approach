@@ -7,9 +7,8 @@
 #include "tf2_ros/transform_listener.hpp"
 #include "tf2_ros/buffer.hpp"
 #include "visualization_msgs/msg/marker.hpp"
+#include "geometry_msgs/msg/pose_stamped.hpp"
 #include "surface_detector_interfaces/msg/detection_results.hpp"
-#include "nav2_msgs/action/navigate_to_pose.hpp"
-#include "rclcpp_action/rclcpp_action.hpp"
 #include "nav2_costmap_2d/costmap_2d.hpp"
 #include "Eigen/Core"
 #include <mutex>
@@ -36,8 +35,8 @@ private:
     std::string base_frame_;
     std::string costmap_topic_name_;
     std::string contours_topic_name_;
-    //TODO change in enum
-    int state_;
+    // Approach goal output (forwarded to navigation by the object_detector node)
+    std::string goal_topic_name_;
     // TODO subscribe to robot footprint for extracting this param:
     double robot_radius_;
     // Costmap value above which we consider it lethal
@@ -53,20 +52,6 @@ private:
     bool enable_goal_clearance_check_;
     int goal_clearance_radius_cells_;
 
-    // ------------ Action client vars:
-    rclcpp_action::Client<nav2_msgs::action::NavigateToPose>::SharedPtr nav_client_;
-    rclcpp::CallbackGroup::SharedPtr nav_callback_group_;
-    rclcpp::executors::SingleThreadedExecutor nav_executor_;
-    std::shared_future<rclcpp_action::ClientGoalHandle
-        <nav2_msgs::action::NavigateToPose>::SharedPtr> future_goal_handle_;
-    nav2_msgs::action::NavigateToPose::Goal goal_action_;
-    rclcpp_action::ClientGoalHandle<nav2_msgs::action::NavigateToPose>::SharedPtr nav_goal_handle_;
-    // Action subs
-    rclcpp::Subscription<nav2_msgs::action::NavigateToPose::Impl::FeedbackMessage>::SharedPtr nav_feedback_sub_;
-    rclcpp::Subscription<action_msgs::msg::GoalStatusArray>::SharedPtr nav_result_sub_;
-    // The (non-spinning) client node used to invoke the action client
-    rclcpp::Node::SharedPtr client_node_;
-    const std::chrono::milliseconds  server_timeout_ = 100ms;
     // ------------ Subscribers
     rclcpp::Subscription<nav2_msgs::msg::Costmap>::SharedPtr costmap_sub_;
     rclcpp::Subscription<surface_detector_interfaces::msg::DetectionResults>::SharedPtr contours_sub_;

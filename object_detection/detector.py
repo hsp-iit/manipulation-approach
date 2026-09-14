@@ -1,6 +1,10 @@
 # SPDX-FileCopyrightText: 2025 Humanoid Sensing and Perception, Istituto Italiano di Tecnologia
 # SPDX-License-Identifier: BSD-3-Clause
 # Author: Simone Micheletti
+import math
+import threading
+import time
+
 import numpy as np
 
 # Grounding DINO
@@ -11,17 +15,17 @@ import cv2
 
 import torch
 from torchvision.ops import box_convert
-import time
 # ROS2
 import rclpy
-from rclpy.callback_groups import ReentrantCallbackGroup
-from rclpy.action import ActionServer
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
+from rclpy.action import ActionClient, ActionServer, CancelResponse, GoalResponse
 from rclpy.action.server import ServerGoalHandle
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
-from nav2_msgs.action._navigate_to_pose import NavigateToPose_FeedbackMessage
-from action_msgs.msg._goal_status_array import GoalStatusArray
-from action_msgs.msg._goal_status import GoalStatus
+from rclpy.time import Time
+from action_msgs.msg import GoalStatus
+from geometry_msgs.msg import PoseStamped
+from nav2_msgs.action import NavigateToPose
 from sensor_msgs.msg import PointCloud2, CameraInfo, Image
 from visualization_msgs.msg import MarkerArray
 from tf2_ros import TransformListener, Buffer
@@ -51,7 +55,13 @@ class ObjectDetector(Node):
                 ('object_pointcloud_topic', 'seg_object_pointcloud'),
                 ('full_pointcloud_topic', 'full_pointcloud'),
                 ('box_threshold', 0.35),    #confidence threshold of the bbox to consider
-                ('text_threshold', 0.35)    #threshold of the text
+                ('text_threshold', 0.35),   #threshold of the text
+                ('planner_goal_topic', '/approach_planner/goal_pose'),  # approach goals computed by the approach_planner
+                ('navigate_to_pose_action', 'navigate_to_pose'),
+                ('nav_server_wait_timeout', 5.0),
+                ('goal_update_min_distance', 0.15),     # [m] a new approach goal is sent to navigation only if it moved more than this
+                ('goal_update_min_angle_deg', 10.0),    # [deg] or if it rotated more than this
+                ('goal_update_min_interval', 1.0)       # [s] minimum time between two goals sent to navigation
                 ])
         # if self.object_string == "" we skip the callback
         self.object_string = ""
@@ -73,13 +83,31 @@ class ObjectDetector(Node):
         # Topic names
         self.object_pointcloud_topic = self.get_parameter("object_pointcloud_topic").value
         self.full_pointcloud_topic = self.get_parameter("full_pointcloud_topic").value
+        planner_goal_topic = self.get_parameter("planner_goal_topic").value
+        self.nav_action_name = self.get_parameter("navigate_to_pose_action").value
+        self.nav_server_wait_timeout = self.get_parameter("nav_server_wait_timeout").value
+        # Goal update thresholds, to avoid preempting navigation at every detection
+        self.goal_update_min_distance = self.get_parameter("goal_update_min_distance").value
+        self.goal_update_min_angle = math.radians(self.get_parameter("goal_update_min_angle_deg").value)
+        self.goal_update_min_interval = self.get_parameter("goal_update_min_interval").value
         self.device = "cuda"
-        self.feedback_dist = 0.0
         self.navigation_start_timeout = 20.0
-        self.goal_status = GoalStatus.STATUS_UNKNOWN
+
+        # Request and navigation state, shared by the action server, camera and navigation callbacks
+        self._lock = threading.Lock()
+        self._busy = False                  # a reach_object request is running
+        self._request_id = 0
+        self._request_first_stamp = None    # stamp of the first camera frame processed for the current request
+        self._last_sent_goal = None         # (PoseStamped, send time) of the last goal sent to navigation
+        self._nav_goal_seq = 0              # id of the latest goal sent to navigation
+        self._nav_goal_handle = None        # handle of the latest navigation goal accepted
+        self._nav_started = False
+        self._nav_goal_rejected = False
+        self._nav_result_status = None      # terminal status of the latest navigation goal
+        self.feedback_dist = 0.0
 
         self.get_logger().info(f'Using parameters: {img_topic=}  {depth_topic=}  {use_camera_info_topic=}  {camera_info_topic=} \n'
-                               f'{self.object_pointcloud_topic=}  {self.robot_base_frame=}')
+                               f'{self.object_pointcloud_topic=}  {self.robot_base_frame=}  {planner_goal_topic=}  {self.nav_action_name=}')
 
         self.cb_grp = ReentrantCallbackGroup()
 
@@ -127,16 +155,27 @@ class ObjectDetector(Node):
         self.reach_object_action_server = ActionServer(self, action_type=ReachObject,
                                                        action_name="/reach_object",
                                                        execute_callback=self.reach_object_callback,
+                                                       goal_callback=self.reach_object_goal_callback,
+                                                       cancel_callback=lambda _: CancelResponse.ACCEPT,
                                                        callback_group=self.cb_grp)
-        self.nav_feedback_sub = self.create_subscription(NavigateToPose_FeedbackMessage, "navigate_to_pose/_action/feedback", self.feedback_sub, 10, callback_group=self.cb_grp)
-        self.nav_status_sub = self.create_subscription(GoalStatusArray, "navigate_to_pose/_action/status", self.goal_status_cbk, 10, callback_group=self.cb_grp)
+        # Navigation: this node is the only one sending the approach goals to NavigateToPose
+        # Not in the reentrant group: rclpy action clients can process the same goal response twice when run concurrently
+        self.nav_client = ActionClient(self, NavigateToPose, self.nav_action_name,
+                                       callback_group=MutuallyExclusiveCallbackGroup())
+        # Mutually exclusive, so that navigation goals are sent in order
+        self.planner_goal_sub = self.create_subscription(PoseStamped, planner_goal_topic, self.planner_goal_callback, 10,
+                                                         callback_group=MutuallyExclusiveCallbackGroup())
 
     def camera_callback(self, img_msg : Image, depth_msg : Image):
         if not self.camera_info_available:
             self.get_logger().warn("Waiting for camera_info topic to become available")
             return
         # Do the callback only if we have to search for an object
-        if self.object_string == "":
+        with self._lock:
+            object_string = self.object_string
+            if object_string != "" and self._request_first_stamp is None:
+                self._request_first_stamp = Time.from_msg(depth_msg.header.stamp)
+        if object_string == "":
             return
         start = time.time()
         # Convert ROS Image message to NumPy array (raw byte data) and then to Tensor
@@ -159,7 +198,7 @@ class ObjectDetector(Node):
         boxes, logits, phrases = predict(
             model=self.dino_model,
             image=image_transformed,
-            caption=self.object_string,
+            caption=object_string,
             box_threshold=self.box_threshold,
             text_threshold=self.text_threshold
         )
@@ -221,83 +260,171 @@ class ObjectDetector(Node):
             self.calib_mat = np.array(msg.k, dtype=np.float32).reshape((3, 3))
             self.camera_info_available = True
 
+    def reach_object_goal_callback(self, goal_request):
+        """
+        Accepts a new request only if no other one is running, since they would share the navigation goal
+        """
+        with self._lock:
+            if self._busy:
+                self.get_logger().warn(f"Rejecting request to reach {goal_request.object_string}: another request is running")
+                return GoalResponse.REJECT
+            self._busy = True
+        return GoalResponse.ACCEPT
+
     def reach_object_callback(self, goal_handle : ServerGoalHandle):
-        feedback_msg = ReachObject.Feedback()
         self.get_logger().info(f"Received request to reach object {goal_handle.request.object_string}")
-        self.object_string = goal_handle.request.object_string
-        self.goal_status = GoalStatus.STATUS_UNKNOWN
+        outcome = "abort"
+        try:
+            outcome, error_msg = self.execute_reach_request(goal_handle)
+        finally:
+            # Stop the object search, and the robot if we are not at the goal
+            self.stop_request(cancel_navigation=(outcome != "succeed"))
 
-        # Enable other nodes? -> TODO think how to do it (probably using srv, but it's an optional feature)
-
-        # Wait for the navigation to start
-        start_wait_time = time.time()
-        while (self.goal_status != GoalStatus.STATUS_EXECUTING and (time.time() - start_wait_time) <= self.navigation_start_timeout):
-            time.sleep(0.2)
-            if goal_handle.is_cancel_requested:
-                self.object_string = ""
-                goal_handle.canceled()
-                result = ReachObject.Result()
-                result.reached = False
-                result.error_msg = "Request cancelled"
-                return result
-        # Timeout condition
-        if (time.time() - start_wait_time) > self.navigation_start_timeout:
-            self.object_string = ""
-            goal_handle.abort()
-            result = ReachObject.Result()
-            result.reached = False
-            result.error_msg = "Timeout while starting the approach pipeline untill navigation"
-            return result
-        # Navigation started -> Now wait for it's end
-        while (self.goal_status == GoalStatus.STATUS_EXECUTING):
-            time.sleep(0.2)
-            if goal_handle.is_cancel_requested:
-                self.object_string = ""
-                goal_handle.canceled()
-                result = ReachObject.Result()
-                result.reached = False
-                result.error_msg = "Request cancelled"
-                return result
-            # Publish feedback
-            feedback_msg.distance_remaining = self.feedback_dist
-            goal_handle.publish_feedback(feedback_msg)
-        # Stop the object search
-        self.object_string = "" # IMPORTANT: stop the search of objects TODO: use bool?
         result = ReachObject.Result()
-        if self.goal_status == GoalStatus.STATUS_SUCCEEDED:
-            # Finish action server
-            result.reached = True
+        result.reached = (outcome == "succeed")
+        result.error_msg = error_msg
+        if outcome == "succeed":
             goal_handle.succeed()
+        elif outcome == "cancel":
+            goal_handle.canceled()
         else:
-            result.reached = False
-            result.error_msg = f"Goal failed with status: {self.goal_status}"
+            self.get_logger().warn(f"Request aborted: {error_msg}")
             goal_handle.abort()
         return result
 
-    def feedback_sub(self, msg : NavigateToPose_FeedbackMessage):
-        self.feedback_dist = msg.feedback.distance_remaining
+    def execute_reach_request(self, goal_handle : ServerGoalHandle):
+        """
+        Runs the object search until navigation reaches the approach goal.
+        Returns the outcome ("succeed", "cancel" or "abort") and the error message
+        """
+        if not self.nav_client.wait_for_server(timeout_sec=self.nav_server_wait_timeout):
+            return "abort", f"Navigation action server {self.nav_action_name} not available"
 
-    def goal_status_cbk(self, msg : GoalStatusArray):
-        if len(msg.status_list) == 0:
-            self.goal_status = GoalStatus.STATUS_UNKNOWN
+        with self._lock:
+            self._request_id += 1
+            self._request_first_stamp = None
+            self._last_sent_goal = None
+            self._nav_goal_handle = None
+            self._nav_started = False
+            self._nav_goal_rejected = False
+            self._nav_result_status = None
+            self.feedback_dist = 0.0
+            # Start the object search
+            self.object_string = goal_handle.request.object_string
+
+        # Enable other nodes? -> TODO think how to do it (probably using srv, but it's an optional feature)
+
+        feedback_msg = ReachObject.Feedback()
+        start_wait_time = time.time()
+        while True:
+            time.sleep(0.2)
+            if goal_handle.is_cancel_requested:
+                return "cancel", "Request cancelled"
+            with self._lock:
+                nav_started = self._nav_started
+                nav_goal_rejected = self._nav_goal_rejected
+                nav_result_status = self._nav_result_status
+                feedback_msg.distance_remaining = self.feedback_dist
+            if nav_goal_rejected:
+                return "abort", "Approach goal rejected by the navigation server"
+            # Wait for the navigation to start
+            if not nav_started:
+                if (time.time() - start_wait_time) > self.navigation_start_timeout:
+                    return "abort", "Timeout while starting the approach pipeline untill navigation"
+                continue
+            # Navigation started -> Now wait for it's end
+            if nav_result_status is None:
+                goal_handle.publish_feedback(feedback_msg)
+                continue
+            if nav_result_status == GoalStatus.STATUS_SUCCEEDED:
+                return "succeed", ""
+            return "abort", f"Goal failed with status: {nav_result_status}"
+
+    def stop_request(self, cancel_navigation):
+        with self._lock:
+            self.object_string = "" # IMPORTANT: stop the search of objects
+            self._request_first_stamp = None
+            nav_goal_handle = self._nav_goal_handle
+            self._nav_goal_handle = None
+            self._busy = False
+        # Goals still being sent to navigation are cancelled in nav_goal_response_callback
+        if cancel_navigation and nav_goal_handle is not None:
+            self.get_logger().info("Cancelling the navigation goal")
+            nav_goal_handle.cancel_goal_async()
+
+    def planner_goal_callback(self, msg : PoseStamped):
+        """
+        Forwards the approach goals of the planner to navigation, skipping stale goals
+        and goals too similar to the last one sent (each new goal preempts the navigation)
+        """
+        with self._lock:
+            if self.object_string == "" or self._request_first_stamp is None:
+                return
+            # Skip goals computed from camera frames older than the current request
+            if Time.from_msg(msg.header.stamp) < self._request_first_stamp:
+                return
+            now = time.monotonic()
+            if self._last_sent_goal is not None:
+                last_goal, last_time = self._last_sent_goal
+                if now - last_time < self.goal_update_min_interval:
+                    return
+                if (last_goal.header.frame_id == msg.header.frame_id and
+                        goal_distance(last_goal, msg) < self.goal_update_min_distance and
+                        goal_yaw_difference(last_goal, msg) < self.goal_update_min_angle):
+                    return
+            self._last_sent_goal = (msg, now)
+            self._nav_goal_seq += 1
+            seq = self._nav_goal_seq
+            request_id = self._request_id
+            self._nav_result_status = None
+
+        self.get_logger().info(f"Sending approach goal to navigation: X: {msg.pose.position.x:.3f} Y: {msg.pose.position.y:.3f}")
+        nav_goal = NavigateToPose.Goal()
+        nav_goal.pose = msg
+        future = self.nav_client.send_goal_async(nav_goal,
+                                                 feedback_callback=lambda feedback: self.nav_feedback_callback(feedback, seq))
+        future.add_done_callback(lambda f: self.nav_goal_response_callback(f, seq, request_id))
+
+    def nav_goal_response_callback(self, future, seq, request_id):
+        nav_goal_handle = future.result()
+        with self._lock:
+            request_active = self.object_string != "" and request_id == self._request_id
+            is_latest = seq == self._nav_goal_seq
+            if request_active and is_latest:
+                if nav_goal_handle.accepted:
+                    self._nav_goal_handle = nav_goal_handle
+                    self._nav_started = True
+                else:
+                    self._nav_goal_rejected = True
+        if not nav_goal_handle.accepted:
             return
-        # We take the status of the last goal
-        self.goal_status = msg.status_list[-1].status
-        ## Values:
-        #int8 STATUS_UNKNOWN = 0
-        ## The goal has been accepted and is awaiting execution.
-        #int8 STATUS_ACCEPTED = 1
-        ## The goal is currently being executed by the action server.
-        #int8 STATUS_EXECUTING = 2
-        ## The client has requested that the goal be canceled and the action server has
-        ## accepted the cancel request.
-        #int8 STATUS_CANCELING = 3
-        ## The goal was achieved successfully by the action server.
-        #int8 STATUS_SUCCEEDED = 4
-        ## The goal was canceled after an external request from an action client.
-        #int8 STATUS_CANCELED = 5
-        ## The goal was terminated by the action server without an external request.
-        #int8 STATUS_ABORTED = 6
+        if not request_active:
+            # The request ended while the goal was being sent: don't let the robot move
+            nav_goal_handle.cancel_goal_async()
+            return
+        # Older goals are preempted by the newer one, so we don't track them
+        if is_latest:
+            nav_goal_handle.get_result_async().add_done_callback(lambda f: self.nav_result_callback(f, seq))
+
+    def nav_result_callback(self, future, seq):
+        with self._lock:
+            if seq == self._nav_goal_seq:
+                self._nav_result_status = future.result().status
+
+    def nav_feedback_callback(self, feedback_msg : NavigateToPose.Impl.FeedbackMessage, seq):
+        with self._lock:
+            if seq == self._nav_goal_seq:
+                self.feedback_dist = feedback_msg.feedback.distance_remaining
+
+def goal_distance(a : PoseStamped, b : PoseStamped):
+    return math.hypot(a.pose.position.x - b.pose.position.x, a.pose.position.y - b.pose.position.y)
+
+def goal_yaw_difference(a : PoseStamped, b : PoseStamped):
+    diff = yaw_from_quaternion(a.pose.orientation) - yaw_from_quaternion(b.pose.orientation)
+    return abs(math.atan2(math.sin(diff), math.cos(diff)))
+
+def yaw_from_quaternion(q):
+    return math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
 
 def main():
     rclpy.init()

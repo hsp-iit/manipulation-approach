@@ -1,11 +1,10 @@
 # SPDX-FileCopyrightText: 2026 Humanoid Sensing and Perception, Istituto Italiano di Tecnologia
 # SPDX-License-Identifier: BSD-3-Clause
 
-import asyncio
-
 import rclpy
-from rclpy.action import ActionClient, ActionServer
+from rclpy.action import ActionClient, ActionServer, CancelResponse
 from rclpy.action.server import ServerGoalHandle
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 
@@ -40,11 +39,19 @@ class ReachCoordinator(Node):
             self.get_parameter("detector_server_wait_timeout").value
         )
 
+        # Downstream detector goal handles, indexed by the upstream goal id.
+        self.detector_goal_handles = {}
+
+        self.cb_grp = ReentrantCallbackGroup()
+
         # Action client used to send goals to the detector node.
+        # Not in the reentrant group: rclpy action clients can process the same
+        # goal response twice when run concurrently.
         self.detector_client = ActionClient(
             self,
             ReachObject,
             self.detector_action_name,
+            callback_group=MutuallyExclusiveCallbackGroup(),
         )
 
         # Public action server used by external callers.
@@ -53,6 +60,8 @@ class ReachCoordinator(Node):
             ReachObject,
             self.coordinator_action_name,
             execute_callback=self.execute_callback,
+            cancel_callback=self.cancel_callback,
+            callback_group=self.cb_grp,
         )
 
         self.get_logger().info(
@@ -70,6 +79,21 @@ class ReachCoordinator(Node):
         outer_feedback.distance_remaining = feedback_msg.feedback.distance_remaining
         outer_goal_handle.publish_feedback(outer_feedback)
 
+    def _abort(self, goal_handle: ServerGoalHandle, error_msg: str):
+        result = ReachObject.Result()
+        result.reached = False
+        result.error_msg = error_msg
+        goal_handle.abort()
+        return result
+
+    def cancel_callback(self, goal_handle: ServerGoalHandle):
+        # Propagate the cancellation to the detector: the upstream goal is
+        # terminated in execute_callback once the detector goal ends.
+        detector_goal_handle = self.detector_goal_handles.get(bytes(goal_handle.goal_id.uuid))
+        if detector_goal_handle is not None:
+            detector_goal_handle.cancel_goal_async()
+        return CancelResponse.ACCEPT
+
     async def execute_callback(self, goal_handle: ServerGoalHandle):
         """Forward one incoming coordinated goal to the detector action server."""
 
@@ -79,12 +103,16 @@ class ReachCoordinator(Node):
 
         # Ensure the downstream detector action server is available.
         if not self.detector_client.wait_for_server(timeout_sec=self.detector_server_wait_timeout):
+            return self._abort(
+                goal_handle,
+                f"Detector action server {self.detector_action_name} not available",
+            )
+
+        if goal_handle.is_cancel_requested:
             result = ReachObject.Result()
             result.reached = False
-            result.error_msg = (
-                f"Detector action server {self.detector_action_name} not available"
-            )
-            goal_handle.abort()
+            result.error_msg = "Coordinator goal canceled"
+            goal_handle.canceled()
             return result
 
         # Build downstream goal from upstream request.
@@ -99,40 +127,29 @@ class ReachCoordinator(Node):
 
         # Downstream server may reject the goal.
         if not detector_goal_handle.accepted:
-            result = ReachObject.Result()
-            result.reached = False
-            result.error_msg = "Detector rejected goal"
-            goal_handle.abort()
-            return result
+            return self._abort(goal_handle, "Detector rejected goal")
 
-        # Wait for downstream result while checking user cancellation requests.
-        detector_result_future = detector_goal_handle.get_result_async()
-
-        while not detector_result_future.done():
-            await asyncio.sleep(0.1)
+        goal_key = bytes(goal_handle.goal_id.uuid)
+        self.detector_goal_handles[goal_key] = detector_goal_handle
+        try:
+            # A cancellation may have arrived while the goal was being sent.
             if goal_handle.is_cancel_requested:
-                # Propagate cancellation to downstream goal and terminate upstream.
-                await detector_goal_handle.cancel_goal_async()
-                result = ReachObject.Result()
-                result.reached = False
-                result.error_msg = "Coordinator goal canceled"
-                goal_handle.canceled()
-                return result
+                detector_goal_handle.cancel_goal_async()
+            # Wait for downstream result (cancellation is forwarded by cancel_callback).
+            detector_wrapped_result = await detector_goal_handle.get_result_async()
+        finally:
+            del self.detector_goal_handles[goal_key]
 
         # Map downstream terminal status into upstream terminal status.
-        detector_wrapped_result = await detector_result_future
         detector_result = detector_wrapped_result.result
         detector_status = detector_wrapped_result.status
 
         if detector_status == GoalStatus.STATUS_SUCCEEDED and detector_result.reached:
             goal_handle.succeed()
-            return detector_result
-
-        if detector_status in (GoalStatus.STATUS_CANCELED, GoalStatus.STATUS_CANCELING):
+        elif goal_handle.is_cancel_requested:
             goal_handle.canceled()
-            return detector_result
-
-        goal_handle.abort()
+        else:
+            goal_handle.abort()
         return detector_result
 
 

@@ -19,6 +19,7 @@ rclcpp_lifecycle::LifecycleNode("approach_planner_node", options)
     this->declare_parameter<std::string>("base_frame", "geometric_unicycle");
     this->declare_parameter<std::string>("costmap_topic_name", "/global_costmap/costmap_raw");
     this->declare_parameter<std::string>("contours_topic_name", "/surface_detector/results");
+    this->declare_parameter<std::string>("goal_topic_name", "/approach_planner/goal_pose");
     this->declare_parameter<double>("robot_radius", 0.2);
     this->declare_parameter<int>("max_costmap_val", 253);
     this->declare_parameter<double>("dist_threshold", 0.6);
@@ -34,10 +35,10 @@ rclcpp_lifecycle::LifecycleNode("approach_planner_node", options)
     base_frame_ = "geometric_unicycle";
     costmap_topic_name_ = "/global_costmap/costmap_raw";
     contours_topic_name_ = "/surface_detector/results";
+    goal_topic_name_ = "/approach_planner/goal_pose";
     robot_radius_ = 0.2;
     buffer_ = std::make_unique<tf2_ros::Buffer>(this->get_clock());
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*buffer_);
-    state_ = 0;
     costmap_received_ = false;
     max_costmap_val_ = 253;
     dist_threshold_ = 0.6;
@@ -685,6 +686,7 @@ CallbackReturn planner::on_configure(const rclcpp_lifecycle::State & state)
     base_frame_ = this->get_parameter("base_frame").as_string();
     costmap_topic_name_ = this->get_parameter("costmap_topic_name").as_string();
     contours_topic_name_ = this->get_parameter("contours_topic_name").as_string();
+    goal_topic_name_ = this->get_parameter("goal_topic_name").as_string();
     robot_radius_ = this->get_parameter("robot_radius").as_double();
     max_costmap_val_ = static_cast<unsigned int>(this->get_parameter("max_costmap_val").as_int());
     dist_threshold_ = this->get_parameter("dist_threshold").as_double();
@@ -708,41 +710,6 @@ CallbackReturn planner::on_configure(const rclcpp_lifecycle::State & state)
         RCLCPP_WARN(this->get_logger(), "goal_clearance_radius_cells cannot be 0. Clamping to 1.");
     }
 
-    state_ = 0; // 0 standby : 1 navigating
-    //Action Client
-    nav_callback_group_ = create_callback_group(
-                            rclcpp::CallbackGroupType::MutuallyExclusive,
-                            false);
-    nav_executor_.add_callback_group(nav_callback_group_, get_node_base_interface());
-    nav_client_ = rclcpp_action::create_client<nav2_msgs::action::NavigateToPose>(
-                            get_node_base_interface(),
-                            get_node_graph_interface(),
-                            get_node_logging_interface(),
-                            get_node_waitables_interface(),
-                            "navigate_to_pose", nav_callback_group_);
-    client_node_ = std::make_shared<rclcpp::Node>("nav_action_client_node_planning_approach");
-    nav_feedback_sub_ = this->create_subscription<nav2_msgs::action::NavigateToPose::Impl::FeedbackMessage>(
-                "navigate_to_pose/_action/feedback",
-                rclcpp::SystemDefaultsQoS(),
-                // Write lambda function to what to do with the feedback
-                [this](const nav2_msgs::action::NavigateToPose::Impl::FeedbackMessage::SharedPtr msg) {
-                    RCLCPP_INFO( this->get_logger(), "Remaining distance from action feedback: %f", msg->feedback.distance_remaining);
-                    {
-                        if (nav_goal_handle_!=nullptr)
-                        {
-                            RCLCPP_INFO(client_node_->get_logger(), "FEEDBACK status: %i", nav_goal_handle_->get_status());
-                        }
-                    }
-                });
-    nav_result_sub_ = this->create_subscription<action_msgs::msg::GoalStatusArray>(
-                "navigate_to_pose/_action/status",
-                rclcpp::SystemDefaultsQoS(),
-                [this](const action_msgs::msg::GoalStatusArray::SharedPtr msg) {
-                    // TODO write logic on completion???
-                    RCLCPP_INFO( this->get_logger(), "GOAL STATUS: %i", msg->status_list.back().status);
-                });
-
-
     // Subs
     costmap_sub_ = this->create_subscription<nav2_msgs::msg::Costmap>(costmap_topic_name_,
                                             rclcpp::SensorDataQoS(),
@@ -757,7 +724,8 @@ CallbackReturn planner::on_configure(const rclcpp_lifecycle::State & state)
     // Pubs
     candidate_marker_pub_ = this->create_publisher<visualization_msgs::msg::Marker>(std::string(this->get_name()) + "/candidate_goals_marker", 10);
     filtered_candidate_marker_pub_ = this->create_publisher<visualization_msgs::msg::Marker>(std::string(this->get_name()) + "/filtered_candidate_marker", 10);
-    goal_pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>("/goal_pose", 10);
+    // The goal is forwarded to navigation by the object_detector node
+    goal_pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(goal_topic_name_, 10);
     return CallbackReturn::SUCCESS;
 }
 
@@ -793,7 +761,6 @@ CallbackReturn planner::on_shutdown(const rclcpp_lifecycle::State & state)
 
 CallbackReturn planner::on_cleanup(const rclcpp_lifecycle::State & state)
 {
-    nav_client_.reset();
     candidate_marker_pub_.reset();
     filtered_candidate_marker_pub_.reset();
     goal_pose_pub_.reset();
