@@ -22,7 +22,13 @@ def main():
     rclpy.init(args=['--ros-args',
                      '-p', 'use_camera_info_topic:=false',
                      '-p', 'goal_update_min_interval:=0.5',
-                     '-p', 'navigation_start_timeout:=3.0'])
+                     '-p', 'navigation_start_timeout:=3.0',
+                     '-p', 'raise_hands_before_approach:=' + os.environ.get('STUB_RAISE_HANDS', 'false'),
+                     '-p', 'hands_motion_duration:=0.5',
+                     '-p', 'hands_motion_timeout:=2.0',
+                     '-p', 'left_arm_rpc_port:=/fake_arm/left/rpc:i',
+                     '-p', 'right_arm_rpc_port:=/fake_arm/right/rpc:i',
+                     '-p', 'arm_reference_frame:=fake_root'])
     node = det_mod.ObjectDetector()
     node.device = 'cpu'
     exe = MultiThreadedExecutor()

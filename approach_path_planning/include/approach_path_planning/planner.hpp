@@ -34,6 +34,15 @@ private:
     unsigned int max_costmap_val_;
     // Maximum distance tolerated between the robot and the object to grasp
     double dist_threshold_;
+    // Weight of the distance from the robot in the goal score: score = object distance + weight * robot distance
+    double goal_robot_distance_weight_;
+    // Both hands must end up over the surface. The offsets are the hands position from the base frame at the goal:
+    // left hand at (forward, +lateral), right hand at (forward, -lateral). They must match the object_detector ones
+    bool enable_hands_over_surface_check_;
+    double hand_forward_offset_;
+    double hand_lateral_offset_;
+    // Minimum distance of each hand from the surface contour
+    double hand_surface_margin_;
     bool enable_window_tangent_orientation_;
     int orientation_window_size_;
     double orientation_object_weight_;
@@ -67,6 +76,10 @@ private:
                                 unsigned int my,
                                 int radius_cells) const;
     double signedArea(const std::vector<geometry_msgs::msg::PointStamped>& poly);
+    bool areHandsOverSurface(const Eigen::Vector3d& goal, const std::vector<Eigen::Vector2d>& contour) const;
+    bool isPointInsideContour(const Eigen::Vector2d& point,
+                              const std::vector<Eigen::Vector2d>& contour,
+                              double margin) const;
     bool generateMarkerMsg(std::vector<Eigen::Vector3d> poses,
                             visualization_msgs::msg::Marker &msg_out,
                             builtin_interfaces::msg::Time stamp,

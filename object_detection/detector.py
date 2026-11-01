@@ -22,21 +22,29 @@ from rclpy.action import ActionClient, ActionServer, CancelResponse, GoalRespons
 from rclpy.action.server import ServerGoalHandle
 from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
+from rclpy.duration import Duration
 from rclpy.time import Time
 from action_msgs.msg import GoalStatus
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PointStamped, PoseStamped
 from nav2_msgs.action import NavigateToPose
 from sensor_msgs.msg import PointCloud2, CameraInfo, Image
 from visualization_msgs.msg import MarkerArray
-from tf2_ros import TransformListener, Buffer
+from tf2_ros import TransformListener, Buffer, TransformException
+from tf2_geometry_msgs import do_transform_point
 
 import message_filters
 from ultralytics import SAM
-from surface_detector_interfaces.msg import SegmentedPointcloud
+from surface_detector_interfaces.msg import DetectionResults, SegmentedPointcloud
 from surface_detector_interfaces.srv import SegmentObject
 from surface_detector_interfaces.action import ReachObject
 
 import utils
+
+# Hands raise stage of a request
+HANDS_WAITING = 0   # waiting for the surface height
+HANDS_SENDING = 1   # sending the commands to the arm controllers
+HANDS_MOVING = 2    # waiting for the end of the motion
+HANDS_READY = 3     # hands above the surface: approach goals can reach navigation
 
 class ObjectDetector(Node):
     def __init__(self):
@@ -65,7 +73,19 @@ class ObjectDetector(Node):
                 ('navigation_start_timeout', 20.0),     # [s] max time from the request to the first goal accepted by navigation
                 ('dino_config_path', "/home/user1/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py"),
                 ('dino_weights_path', "/home/user1/GroundingDINO/weights/groundingdino_swint_ogc.pth"),
-                ('sam_model', "sam2.1_l.pt")
+                ('sam_model', "sam2.1_l.pt"),
+                ('raise_hands_before_approach', True),  # hands above the surface before any approach goal reaches navigation
+                ('surface_results_topic', '/surface_detector/results'),
+                ('left_arm_rpc_port', '/cartesian-control/left_arm/rpc:i'),
+                ('right_arm_rpc_port', '/cartesian-control/right_arm/rpc:i'),
+                ('arm_reference_frame', 'root_link'),   # root frame of the arm controllers
+                ('arm_rpc_timeout', 1.0),               # [s]
+                ('hand_forward_offset', 0.4),           # [m] hands position in the surface results frame, must match the approach_planner
+                ('hand_lateral_offset', 0.2),           # [m] left hand at +offset, right hand at -offset
+                ('hand_surface_clearance', 0.1),        # [m] hands height above the surface
+                ('hands_raise_min_distance', 0.5),      # [m] minimum distance from the surface contour to raise the hands
+                ('hands_motion_duration', 4.0),         # [s] trajectory duration
+                ('hands_motion_timeout', 10.0)          # [s] max time for the arms to report the end of the motion
                 ])
         # if self.object_string == "" we skip the callback
         self.object_string = ""
@@ -96,6 +116,15 @@ class ObjectDetector(Node):
         self.goal_update_min_interval = self.get_parameter("goal_update_min_interval").value
         self.device = "cuda"
         self.navigation_start_timeout = self.get_parameter("navigation_start_timeout").value
+        # Hands raise
+        self.raise_hands = self.get_parameter("raise_hands_before_approach").value
+        self.arm_reference_frame = self.get_parameter("arm_reference_frame").value
+        self.hand_forward_offset = self.get_parameter("hand_forward_offset").value
+        self.hand_lateral_offset = self.get_parameter("hand_lateral_offset").value
+        self.hand_surface_clearance = self.get_parameter("hand_surface_clearance").value
+        self.hands_raise_min_distance = self.get_parameter("hands_raise_min_distance").value
+        self.hands_motion_duration = self.get_parameter("hands_motion_duration").value
+        self.hands_motion_timeout = self.get_parameter("hands_motion_timeout").value
 
         # Request and navigation state, shared by the action server, camera and navigation callbacks
         self._lock = threading.Lock()
@@ -108,6 +137,9 @@ class ObjectDetector(Node):
         self._nav_started = False
         self._nav_goal_rejected = False
         self._nav_result_status = None      # terminal status of the latest navigation goal
+        self._hands_state = HANDS_READY
+        self._hands_error = ""
+        self._hands_move_start = None       # time.monotonic() of the arm commands
         self.feedback_dist = 0.0
 
         self.get_logger().info(f'Using parameters: {img_topic=}  {depth_topic=}  {use_camera_info_topic=}  {camera_info_topic=} \n'
@@ -167,6 +199,18 @@ class ObjectDetector(Node):
         # Not in the reentrant group: rclpy action clients can process the same goal response twice when run concurrently
         self.nav_client = ActionClient(self, NavigateToPose, self.nav_action_name,
                                        callback_group=MutuallyExclusiveCallbackGroup())
+        # The hands are moved only with the surface known, and only this node commands them during the approach
+        self.arms = None
+        if self.raise_hands:
+            from arm_interface import ArmInterface  # only here, so that YARP is needed only if the hands are moved
+            self.arms = ArmInterface("/" + self.get_name(),
+                                     {"left": self.get_parameter("left_arm_rpc_port").value,
+                                      "right": self.get_parameter("right_arm_rpc_port").value},
+                                     self.get_parameter("arm_rpc_timeout").value)
+            self.surface_sub = self.create_subscription(DetectionResults,
+                                                        self.get_parameter("surface_results_topic").value,
+                                                        self.surface_results_callback, 10,
+                                                        callback_group=MutuallyExclusiveCallbackGroup())
         # Mutually exclusive, so that navigation goals are sent in order
         self.planner_goal_sub = self.create_subscription(PoseStamped, planner_goal_topic, self.planner_goal_callback, 10,
                                                          callback_group=MutuallyExclusiveCallbackGroup())
@@ -305,6 +349,10 @@ class ObjectDetector(Node):
         """
         if not self.nav_client.wait_for_server(timeout_sec=self.nav_server_wait_timeout):
             return "abort", f"Navigation action server {self.nav_action_name} not available"
+        if self.raise_hands:
+            missing_arms = self.arms.connect()
+            if missing_arms:
+                return "abort", f"Arm controllers not available: {', '.join(missing_arms)}"
 
         with self._lock:
             self._request_id += 1
@@ -314,6 +362,9 @@ class ObjectDetector(Node):
             self._nav_started = False
             self._nav_goal_rejected = False
             self._nav_result_status = None
+            self._hands_state = HANDS_WAITING if self.raise_hands else HANDS_READY
+            self._hands_error = ""
+            self._hands_move_start = None
             self.feedback_dist = 0.0
             # Start the object search
             self.object_string = goal_handle.request.object_string
@@ -331,6 +382,14 @@ class ObjectDetector(Node):
                 nav_goal_rejected = self._nav_goal_rejected
                 nav_result_status = self._nav_result_status
                 feedback_msg.distance_remaining = self.feedback_dist
+                hands_error = self._hands_error
+                hands_moving = self._hands_state == HANDS_MOVING
+            if hands_error:
+                return "abort", hands_error
+            if hands_moving:
+                hands_error = self.update_hands_motion()
+                if hands_error:
+                    return "abort", hands_error
             if nav_goal_rejected:
                 return "abort", "Approach goal rejected by the navigation server"
             # Wait for the navigation to start
@@ -352,11 +411,95 @@ class ObjectDetector(Node):
             self._request_first_stamp = None
             nav_goal_handle = self._nav_goal_handle
             self._nav_goal_handle = None
+            hands_in_motion = self._hands_state in (HANDS_SENDING, HANDS_MOVING)
+            self._hands_state = HANDS_READY
             self._busy = False
+        if hands_in_motion:
+            self.stop_arms()
         # Goals still being sent to navigation are cancelled in nav_goal_response_callback
         if cancel_navigation and nav_goal_handle is not None:
             self.get_logger().info("Cancelling the navigation goal")
             nav_goal_handle.cancel_goal_async()
+
+    def stop_arms(self):
+        for arm in self.arms.ports:
+            try:
+                self.arms.stop(arm)
+            except RuntimeError as error:
+                self.get_logger().error(f"Could not stop the arm: {error}")
+
+    def surface_results_callback(self, msg : DetectionResults):
+        """
+        Starts raising the hands above the surface. It's done once per request, from the first valid surface
+        """
+        if len(msg.surface_contours) == 0:
+            return
+        with self._lock:
+            if self._hands_state != HANDS_WAITING or self._request_first_stamp is None:
+                return
+            # Skip surfaces computed from camera frames older than the current request
+            if Time.from_msg(msg.segmented_object.header.stamp) < self._request_first_stamp:
+                return
+            self._hands_state = HANDS_SENDING
+            request_id = self._request_id
+        try:
+            targets = self.compute_hand_targets(msg)
+            for arm, target in targets.items():
+                if not self.arms.go_to_position(arm, target, self.hands_motion_duration):
+                    raise RuntimeError(f"The {arm} arm controller refused the motion")
+        except (RuntimeError, TransformException) as error:
+            with self._lock:
+                self._hands_error = f"Could not raise the hands: {error}"
+            return
+        with self._lock:
+            request_active = self._hands_state == HANDS_SENDING and request_id == self._request_id
+            if request_active:
+                self._hands_state = HANDS_MOVING
+                self._hands_move_start = time.monotonic()
+        if not request_active:
+            # The request ended while the commands were being sent: don't let the arms move
+            self.stop_arms()
+
+    def compute_hand_targets(self, msg : DetectionResults):
+        """
+        Hand positions above the surface, in the arm controllers frame. The arms have no collision avoidance
+        and move in a straight line, so they are raised only far from the surface, to not hit it from below
+        """
+        contour = np.array([(p.point.x, p.point.y) for p in msg.surface_contours])
+        distance = distance_to_polyline(contour)
+        if distance < self.hands_raise_min_distance:
+            raise RuntimeError(f"too close to the surface ({distance:.2f} m, minimum {self.hands_raise_min_distance:.2f} m)")
+        header = msg.surface_contours[0].header
+        transform = self.tf_buffer.lookup_transform(self.arm_reference_frame, header.frame_id, Time(),
+                                                    timeout=Duration(seconds=1.0))
+        targets = {}
+        for arm, side in (("left", 1.0), ("right", -1.0)):
+            hand = PointStamped(header=header)
+            hand.point.x = self.hand_forward_offset
+            hand.point.y = side * self.hand_lateral_offset
+            hand.point.z = msg.surface_contours[0].point.z + self.hand_surface_clearance
+            target = do_transform_point(hand, transform).point
+            targets[arm] = [target.x, target.y, target.z]
+        return targets
+
+    def update_hands_motion(self):
+        """
+        Checks the end of the hands motion. Returns the error message, if any
+        """
+        elapsed = time.monotonic() - self._hands_move_start
+        # The elapsed time guards from a status read before the controllers started the motion
+        try:
+            done = elapsed >= self.hands_motion_duration and all(self.arms.is_motion_done(arm) for arm in self.arms.ports)
+        except RuntimeError as error:
+            return f"Could not raise the hands: {error}"
+        if done:
+            with self._lock:
+                if self._hands_state == HANDS_MOVING:
+                    self._hands_state = HANDS_READY
+            return ""
+        if elapsed > self.hands_motion_timeout:
+            return "Timeout while raising the hands"
+        return ""
 
     def planner_goal_callback(self, msg : PoseStamped):
         """
@@ -365,6 +508,9 @@ class ObjectDetector(Node):
         """
         with self._lock:
             if self.object_string == "" or self._request_first_stamp is None:
+                return
+            # The hands must be above the surface before the robot gets close to it
+            if self._hands_state != HANDS_READY:
                 return
             # Skip goals computed from camera frames older than the current request
             if Time.from_msg(msg.header.stamp) < self._request_first_stamp:
@@ -422,6 +568,16 @@ class ObjectDetector(Node):
             if seq == self._nav_goal_seq:
                 self.feedback_dist = feedback_msg.feedback.distance_remaining
 
+def distance_to_polyline(points):
+    """
+    Distance of the origin from the closed polyline with the given Nx2 points
+    """
+    A = points
+    AB = np.roll(points, -1, axis=0) - A
+    length_sq = np.maximum(np.sum(AB * AB, axis=1), 1e-12)
+    t = np.clip(-np.sum(A * AB, axis=1) / length_sq, 0.0, 1.0)
+    return float(np.min(np.linalg.norm(A + t[:, None] * AB, axis=1)))
+
 def goal_distance(a : PoseStamped, b : PoseStamped):
     return math.hypot(a.pose.position.x - b.pose.position.x, a.pose.position.y - b.pose.position.y)
 
@@ -444,6 +600,8 @@ def main():
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
+        if node.arms is not None:
+            node.arms.close()
         node.destroy_node()
         rclpy.try_shutdown()
 

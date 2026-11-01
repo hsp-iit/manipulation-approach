@@ -25,6 +25,11 @@ rclcpp_lifecycle::LifecycleNode("approach_planner_node", options)
     this->declare_parameter<double>("goal_edge_margin", 0.05);
     this->declare_parameter<int>("max_costmap_val", 253);
     this->declare_parameter<double>("dist_threshold", 0.6);
+    this->declare_parameter<double>("goal_robot_distance_weight", 0.25);
+    this->declare_parameter<bool>("enable_hands_over_surface_check", true);
+    this->declare_parameter<double>("hand_forward_offset", 0.4);
+    this->declare_parameter<double>("hand_lateral_offset", 0.2);
+    this->declare_parameter<double>("hand_surface_margin", 0.05);
     this->declare_parameter<bool>("enable_window_tangent_orientation", true);
     this->declare_parameter<int>("orientation_window_size", 2);
     this->declare_parameter<double>("orientation_object_weight", 0.7);
@@ -45,6 +50,11 @@ rclcpp_lifecycle::LifecycleNode("approach_planner_node", options)
     costmap_received_ = false;
     max_costmap_val_ = 253;
     dist_threshold_ = 0.6;
+    goal_robot_distance_weight_ = 0.25;
+    enable_hands_over_surface_check_ = true;
+    hand_forward_offset_ = 0.4;
+    hand_lateral_offset_ = 0.2;
+    hand_surface_margin_ = 0.05;
     enable_window_tangent_orientation_ = true;
     orientation_window_size_ = 2;
     orientation_object_weight_ = 0.7;
@@ -337,16 +347,36 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
     }
     // Check if the robot can reach them: a single search from the robot cell for all the candidates
     std::vector<bool> reachable = computeReachableCells(&global_costmap_, r_grid_x, r_grid_y, local_goal_cells);
+    std::vector<Eigen::Vector2d> contour_xy;
+    contour_xy.reserve(L);
+    for (const auto & point : transformed_contours)
+    {
+        contour_xy.emplace_back(point.point.x, point.point.y);
+    }
+    size_t unreachable_goals = 0;
+    size_t hands_off_surface_goals = 0;
     for (size_t i = 0; i < local_goals.size(); ++i)
     {
-        if (reachable[local_goal_cells[i]])
+        if (!reachable[local_goal_cells[i]])
+        {
+            ++unreachable_goals;
+        }
+        else if (enable_hands_over_surface_check_ && !areHandsOverSurface(local_goals[i], contour_xy))
+        {
+            ++hands_off_surface_goals;
+        }
+        else
         {
             filtered_goals.push_back(local_goals[i]);
         }
     }
-    if (filtered_goals.size() < local_goals.size())
+    if (unreachable_goals > 0)
     {
-        RCLCPP_INFO_STREAM(get_logger(), "Skipped " << local_goals.size() - filtered_goals.size() << " unreachable goal candidates");
+        RCLCPP_INFO_STREAM(get_logger(), "Skipped " << unreachable_goals << " unreachable goal candidates");
+    }
+    if (hands_off_surface_goals > 0)
+    {
+        RCLCPP_INFO_STREAM(get_logger(), "Skipped " << hands_off_surface_goals << " goal candidates with the hands off the surface");
     }
     // Check if we found at least one valid candidate
     if (filtered_goals.size() < 1)
@@ -368,29 +398,20 @@ void planner::contours_update(surface_detector_interfaces::msg::DetectionResults
         filtered_candidate_marker_pub_->publish(filtered_goal_msg);
     }
     RCLCPP_INFO_STREAM(get_logger(), "Published filtered_goal_msg");
-    // 5) Score each valid candidate
-    // The poses are ordered from the closest to the robot to the furthest.
-    // We need to evaluate the costmap values
+    // 5) Score each valid candidate: the closer to the object, the better the reach.
+    // The robot distance avoids a long walk when poses on different sides of the surface are equally close to the object
     Eigen::Vector3d best_goal;
     bool found = false;
-    double best_dist_sq = 0;
+    double best_score = 0;
     for(size_t i = 0; i < filtered_goals.size(); ++i)
     {
-        // Chose as best pose the one closer to the robot
-        double robot_dist_dx = filtered_goals[i][0] - robot_pose_eigen[0];
-        double robot_dist_dy = filtered_goals[i][1] - robot_pose_eigen[1];
-        double robot_dist_sq = robot_dist_dx * robot_dist_dx + robot_dist_dy * robot_dist_dy;
-        if (!found) // just for the first time
+        Eigen::Vector2d goal_xy(filtered_goals[i][0], filtered_goals[i][1]);
+        double score = (goal_xy - P).norm() + goal_robot_distance_weight_ * (goal_xy - robot_pose_eigen).norm();
+        if (!found || score < best_score)
         {
             best_goal = filtered_goals[i];
             found = true;
-            best_dist_sq = robot_dist_sq;
-        }
-        if (robot_dist_sq < best_dist_sq)
-        {
-            best_goal = filtered_goals[i];
-            found = true;
-            best_dist_sq = robot_dist_sq;
+            best_score = score;
         }
     }
     auto loop_duration = rclcpp::Duration(this->get_clock()->now() - loop_start);
@@ -531,7 +552,10 @@ bool planner::isCellNeighborhoodFree(const nav2_costmap_2d::Costmap2D* costmap,
     double radius = radius_cells;
     if (radius < 0)
     {
-        radius = std::max(1.0, robot_radius_ / costmap->getResolution());
+        // The costmap resolution comes from a float32: without this tolerance a radius of a whole number of cells
+        // ends up just below it, and the cells at exactly that distance would be skipped
+        constexpr double kRadiusToleranceCells = 1e-4;
+        radius = std::max(1.0, robot_radius_ / costmap->getResolution() + kRadiusToleranceCells);
     }
     const int max_offset = static_cast<int>(std::ceil(radius));
 
@@ -564,6 +588,49 @@ bool planner::isCellNeighborhoodFree(const nav2_costmap_2d::Costmap2D* costmap,
     }
 
     return true;
+}
+
+bool planner::areHandsOverSurface(const Eigen::Vector3d& goal, const std::vector<Eigen::Vector2d>& contour) const
+{
+    const double cos_theta = std::cos(goal[2]);
+    const double sin_theta = std::sin(goal[2]);
+    for (const double side : {1.0, -1.0})
+    {
+        const double lateral = side * hand_lateral_offset_;
+        const Eigen::Vector2d hand(goal[0] + hand_forward_offset_ * cos_theta - lateral * sin_theta,
+                                   goal[1] + hand_forward_offset_ * sin_theta + lateral * cos_theta);
+        if (!isPointInsideContour(hand, contour, hand_surface_margin_))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool planner::isPointInsideContour(const Eigen::Vector2d& point,
+                                   const std::vector<Eigen::Vector2d>& contour,
+                                   double margin) const
+{
+    // Even-odd rule, and every segment must stay at least margin away from the point
+    bool inside = false;
+    for (size_t i = 0; i < contour.size(); ++i)
+    {
+        const Eigen::Vector2d& A = contour[i];
+        const Eigen::Vector2d& B = contour[(i + 1) % contour.size()];
+        if ((A.y() > point.y()) != (B.y() > point.y()) &&
+            point.x() < A.x() + (point.y() - A.y()) * (B.x() - A.x()) / (B.y() - A.y()))
+        {
+            inside = !inside;
+        }
+        const Eigen::Vector2d AB = B - A;
+        const double segment_length_sq = AB.squaredNorm();
+        const double t = segment_length_sq > 1e-12 ? std::clamp((point - A).dot(AB) / segment_length_sq, 0.0, 1.0) : 0.0;
+        if ((A + t * AB - point).norm() < margin)
+        {
+            return false;
+        }
+    }
+    return inside;
 }
 
 double planner::signedArea(const std::vector<geometry_msgs::msg::PointStamped>& poly)
@@ -661,6 +728,11 @@ CallbackReturn planner::on_configure(const rclcpp_lifecycle::State & state)
     goal_edge_margin_ = this->get_parameter("goal_edge_margin").as_double();
     max_costmap_val_ = static_cast<unsigned int>(this->get_parameter("max_costmap_val").as_int());
     dist_threshold_ = this->get_parameter("dist_threshold").as_double();
+    goal_robot_distance_weight_ = this->get_parameter("goal_robot_distance_weight").as_double();
+    enable_hands_over_surface_check_ = this->get_parameter("enable_hands_over_surface_check").as_bool();
+    hand_forward_offset_ = this->get_parameter("hand_forward_offset").as_double();
+    hand_lateral_offset_ = this->get_parameter("hand_lateral_offset").as_double();
+    hand_surface_margin_ = this->get_parameter("hand_surface_margin").as_double();
     enable_window_tangent_orientation_ = this->get_parameter("enable_window_tangent_orientation").as_bool();
     orientation_window_size_ = this->get_parameter("orientation_window_size").as_int();
     orientation_object_weight_ = this->get_parameter("orientation_object_weight").as_double();
@@ -670,6 +742,11 @@ CallbackReturn planner::on_configure(const rclcpp_lifecycle::State & state)
     enable_goal_clearance_check_ = this->get_parameter("enable_goal_clearance_check").as_bool();
     goal_clearance_radius_cells_ = this->get_parameter("goal_clearance_radius_cells").as_int();
 
+    if (goal_robot_distance_weight_ < 0.0)
+    {
+        goal_robot_distance_weight_ = 0.0;
+        RCLCPP_WARN(this->get_logger(), "goal_robot_distance_weight must be >= 0. Clamping to 0.");
+    }
     if (orientation_window_size_ < 1)
     {
         orientation_window_size_ = 1;

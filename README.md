@@ -1,6 +1,8 @@
 # manipulation-approach
 Pipeline to safely approach desks/tables where tasks need to be performed or have objects to be grasped.
 
+In depth documentation, including the theory behind each stage, is in the [docs](docs/README.md) folder.
+
 ## Install
 Compile the docker using the `build_docker.sh` script inside the `docker` folder. Setting accordingly the TAG and DOCKER_NAME variables inside the script.
 
@@ -75,6 +77,11 @@ python3 object_detection/test/test_reach.py
 ```
 It runs on an isolated ROS domain (`ROS_DOMAIN_ID=87` by default, override with `REACH_TEST_DOMAIN_ID`), so it does not interfere with a running pipeline.
 
+Integration test of the hands raise stage (same stubs, fake arm controllers on a private YARP name server):
+```
+python3 object_detection/test/test_hands.py
+```
+
 ## Nodes Explaination
 
 ### 1- Plane Segmentation
@@ -124,6 +131,10 @@ Declared in `object_detection/detector.py` (set them with `--ros-args -p name:=v
 | `dino_weights_path` | `/home/user1/GroundingDINO/weights/groundingdino_swint_ogc.pth` | Grounding DINO weights. |
 | `sam_model` | `sam2.1_l.pt` | SAM2 model (downloaded by ultralytics if missing). |
 | `camera_reference_frame` | `realsense_compensated` | Frame of the published pointclouds. If empty, the depth image frame is used. |
+| `raise_hands_before_approach` | `true` | Raises the hands above the surface, through the YARP arm controllers, before any goal reaches Nav2. If they are not available the request aborts. |
+| `hand_forward_offset`, `hand_lateral_offset` | `0.4`, `0.2` | Hands position (m) from the base frame. Must match the `approach_planner` values. |
+| `hand_surface_clearance` | `0.1` | Hands height (m) above the surface. |
+| `hands_raise_min_distance` | `0.5` | Minimum distance (m) from the surface to raise the hands: closer than this the request aborts. |
 
 Only one `/reach_object` request runs at a time. Cancelling the request (or its failure) also cancels the navigation goal.
 
@@ -140,6 +151,10 @@ Configured in `approach_path_planning/param/approach_path_planning.yaml`.
 | `goal_edge_margin` | `0.05` | Extra distance (m) of the candidates from the surface contour: offset = `robot_radius + goal_edge_margin`. |
 | `max_costmap_val` | `253` | Cost threshold considered non-traversable (`>=` this value is rejected). |
 | `dist_threshold` | `0.6` | Maximum distance (m) allowed between candidate goal and object for grasp feasibility. |
+| `goal_robot_distance_weight` | `0.25` | Weight of the robot distance in the goal score: `object distance + weight * robot distance`. |
+| `enable_hands_over_surface_check` | `true` | Rejects goals where a hand would end up off the surface. |
+| `hand_forward_offset`, `hand_lateral_offset` | `0.4`, `0.2` | Hands position (m) from the base frame at the goal. Must match the `object_detector` values. |
+| `hand_surface_margin` | `0.05` | Minimum distance (m) of each hand from the contour. |
 | `enable_window_tangent_orientation` | `true` | Enables robust orientation computation from local contour window tangent. |
 | `orientation_window_size` | `2` | Half-window size (in contour points) used to smooth local tangent estimation. |
 | `orientation_object_weight` | `0.7` | Weight for the object-facing direction in blended heading computation. |

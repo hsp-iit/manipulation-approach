@@ -9,6 +9,15 @@ approach_planner:
     goal_edge_margin: 0.05
     max_costmap_val: 253
     dist_threshold: 0.6
+    # The goal minimizes: distance from the object + goal_robot_distance_weight * distance from the robot
+    goal_robot_distance_weight: 0.25
+
+    # Both hands must be over the surface at the goal, at least hand_surface_margin inside its contour.
+    # Offsets from the base frame, they must match the object_detector parameters with the same names.
+    enable_hands_over_surface_check: true
+    hand_forward_offset: 0.4
+    hand_lateral_offset: 0.2
+    hand_surface_margin: 0.05
 
     # Orientation shaping (toggle + tuning)
     enable_window_tangent_orientation: true
