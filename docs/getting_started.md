@@ -209,7 +209,44 @@ Three things to know:
 
 ---
 
-## 8. Run the tests
+## 8. Test on the robot, stand-alone
+
+Start with the robot about 1 m from the surface, with the object and the surface edge in view. Add one
+risk at a time. Nav2 and the SLAM or localization that provides `map` come from your navigation stack:
+nothing in this repo starts them.
+
+Check `xy_goal_tolerance` first. The goal is usually less than 1 m away, so a large tolerance (0.4 m in
+`nav2_params_r1.yaml`) stops the robot short, or reports success without moving.
+
+`approach_full_stack.launch.py` cannot pass parameters to the detector, so start it by hand.
+
+```bash
+# Always: surface detector, planner, RViz
+ros2 launch approach_path_planning approach_pipeline.launch.py
+```
+
+**Step 1, nothing moves.** Goals go to a logging server, and the arms are not used:
+
+```bash
+python3 object_detection/test/fake_nav.py --ros-args -r navigate_to_pose:=approach_dry_run
+python3 object_detection/detector.py --ros-args \
+  -p navigate_to_pose_action:=approach_dry_run -p raise_hands_before_approach:=false
+```
+
+Check the contour and goals in RViz and in the `fake_nav` log.
+
+**Step 2, arms only.** Start both arm controllers and remove `raise_hands_before_approach:=false`. The
+hands rise, the base stays still. Clear the area around the arms. Lower the speed with a longer
+`hands_motion_duration`.
+
+**Step 3, full approach.** Stop `fake_nav` and remove the `navigate_to_pose_action` override.
+
+In all steps, send the request with the command in [section 5](#5-send-a-request), and press `Ctrl+C` to
+cancel it. Keep `hands_raise_min_distance` in mind: under 0.5 m from the contour, the request aborts.
+
+---
+
+## 9. Run the tests
 
 ```bash
 python3 object_detection/test/test_reach.py
