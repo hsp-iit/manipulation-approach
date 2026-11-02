@@ -34,7 +34,7 @@ class ArmInterface:
                 missing.append(arm)
         return missing
 
-    def _call(self, arm, name, *args):
+    def _request(self, arm, name, *args):
         command = yarp.Bottle()
         command.addString(name)
         for value in args:
@@ -44,12 +44,29 @@ class ArmInterface:
             written = self.ports[arm].write(command, reply)
         if not written or reply.size() == 0:
             raise RuntimeError(f"No reply to {name} from the {arm} controller")
+        return reply
+
+    def _call(self, arm, name, *args):
+        reply = self._request(arm, name, *args)     # kept: the value of get() does not keep the bottle alive
         # The controllers reply with the vocabs ok and fail: Value.asBool() is true for both
         return reply.get(0).toString() == "ok"
 
     def go_to_position(self, arm, position, duration):
         """Starts moving the hand to position [x, y, z], in the controller root frame, keeping its orientation"""
         return self._call(arm, "go_to_position", *position, duration)
+
+    def get_position(self, arm):
+        """Current hand position [x, y, z], in the controller root frame"""
+        reply = self._request(arm, "get_pose")
+        # A yarp::sig::Matrix on the wire: rows, cols and the list of values, by row
+        values = reply.get(2).asList()
+        if reply.get(0).asInt32() != 4 or reply.get(1).asInt32() != 4 or values is None or values.size() != 16:
+            raise RuntimeError(f"Invalid pose from the {arm} controller: {reply.toString()}")
+        return [values.get(i).asFloat64() for i in (3, 7, 11)]
+
+    def go_home(self, arm):
+        """Starts moving the hand in a straight line to its pose at the start of the controller"""
+        return self._call(arm, "go_home")
 
     def is_motion_done(self, arm):
         return self._call(arm, "is_motion_done")

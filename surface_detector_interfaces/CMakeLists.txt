@@ -26,6 +26,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
                             "msg/DetectionResults.msg"
                             "srv/SegmentObject.srv"
                             "action/ReachObject.action"
+                            "action/LowerHands.action"
                             DEPENDENCIES sensor_msgs geometry_msgs 
                             LIBRARY_NAME ${PROJECT_NAME}
 )

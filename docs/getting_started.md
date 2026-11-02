@@ -237,7 +237,14 @@ Check the contour and goals in RViz and in the `fake_nav` log.
 
 **Step 2, arms only.** Start both arm controllers and remove `raise_hands_before_approach:=false`. The
 hands rise, the base stays still. Clear the area around the arms. Lower the speed with a longer
-`hands_motion_duration`.
+`hands_motion_duration`. To bring them down:
+
+```bash
+ros2 action send_goal /lower_hands surface_detector_interfaces/action/LowerHands "{}"
+```
+
+Try this away from the table first. Then measure `hand_retract_forward_offset`, and check the home pose before
+lowering at the table: see [L20](known_limitations.md#l20-hands-raised-near-the-table-are-untested-on-a-robot).
 
 **Step 3, full approach.** Stop `fake_nav` and remove the `navigate_to_pose_action` override.
 

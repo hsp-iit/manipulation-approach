@@ -63,7 +63,8 @@ navigation stop distance, before any approach goal is forwarded:
 **Fail safe.** Goals are dropped until the stage ends, so the robot never approaches with the hands
 down. Any problem aborts the request: a controller not running, a refused motion, no reply, or no end of
 motion within `hands_motion_timeout` (which also covers a controller in its error state). If the request
-ends during the motion, both arms get a `stop`. On success, the hands stay raised for the grasp.
+ends during the motion, both arms get a `stop`. On success, the hands stay raised for the grasp, until a
+[`/lower_hands`](#lowering-the-hands) request.
 
 The stage runs once per request, and it does not read the current hand pose. Calling `/reach_object`
 again while already close to the table with the hands raised aborts with "too close".
@@ -73,6 +74,26 @@ again while already close to the table with the hands raised aborts with "too cl
 The controllers reply with the vocabs `ok` and `fail`. `yarp.Value.asBool()` is true for both, so
 `arm_interface.py` compares the text. This was checked against a server generated from the controller's
 own `service.thrift`.
+
+
+### Lowering the hands
+
+`/lower_hands` is a separate action of `object_detector`, with no goal fields. A request never lowers the hands by
+itself, because the caller may want a grasp next. It runs when no `/reach_object` request is running, and the other
+way around: the second request is rejected, since they would share the arms.
+
+The hands cannot go straight home. `go_home` is a straight line to the pose the arm had when its controller started,
+the controllers have no collision avoidance, and after an approach the hands are over the surface, so that line can
+cross the edge. So the request has two stages:
+
+1. **Retract.** It reads each hand with `get_pose`, and moves those ahead of `hand_retract_forward_offset` back to
+   it, at the same height and on the same side. Reading the pose makes it work from anywhere, for example after a
+   stopped motion or a restart of the detector.
+2. **Home.** It calls `go_home` on both arms.
+
+Each stage ends like the raise stage, with `hands_motion_duration` and `is_motion_done`, within
+`hands_motion_timeout`. A cancel, a refused motion, a missing controller or a timeout stops both arms and leaves
+them where they are. `go_home` is refused on R1 while the arm is moving.
 
 ---
 

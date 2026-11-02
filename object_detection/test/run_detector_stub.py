@@ -28,7 +28,8 @@ def main():
                      '-p', 'hands_motion_timeout:=2.0',
                      '-p', 'left_arm_rpc_port:=/fake_arm/left/rpc:i',
                      '-p', 'right_arm_rpc_port:=/fake_arm/right/rpc:i',
-                     '-p', 'arm_reference_frame:=fake_root'])
+                     '-p', 'arm_reference_frame:=fake_root',
+                     '-p', 'robot_base_frame:=base'])
     node = det_mod.ObjectDetector()
     node.device = 'cpu'
     exe = MultiThreadedExecutor()

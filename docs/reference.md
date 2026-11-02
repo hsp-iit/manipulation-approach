@@ -43,6 +43,7 @@ geometry_msgs/PointStamped[] surface_contours   # closed polygon: the last point
 | Name | Type | Role | Node |
 |---|---|---|---|
 | `/reach_object` | `ReachObject` | Server | `object_detector` |
+| `/lower_hands` | `LowerHands` | Server | `object_detector`, with `raise_hands_before_approach` |
 | `/reach_object_coordinator` | `ReachObject` | Server | `reach_coordinator` |
 | `/reach_object` | `ReachObject` | Client | `reach_coordinator` |
 | `navigate_to_pose` | `nav2_msgs/NavigateToPose` | Client | `object_detector` |
@@ -53,7 +54,8 @@ geometry_msgs/PointStamped[] surface_contours   # closed polygon: the last point
 
 With `raise_hands_before_approach`, `object_detector` is an RPC client of two `ergocub-cartesian-control`
 controllers. It opens `/object_detector/left/rpc:o` and `/object_detector/right/rpc:o`, and calls
-`go_to_position`, `is_motion_done` and `stop`. Targets are in `arm_reference_frame`.
+`go_to_position`, `is_motion_done` and `stop`, plus `get_pose` and `go_home` for `/lower_hands`. Targets are in
+`arm_reference_frame`.
 
 ---
 
@@ -137,6 +139,7 @@ Set on the command line, with `--ros-args -p name:=value`. Read once at startup.
 | `hand_lateral_offset` | `0.2` | Left hand at +offset, right hand at −offset, in metres. Must match `approach_planner`. |
 | `hand_surface_clearance` | `0.1` | Hands height above the surface, in metres. |
 | `hands_raise_min_distance` | `0.5` | Minimum distance from the contour to raise the hands, in metres. |
+| `hand_retract_forward_offset` | `0.15` | `/lower_hands` first pulls the hands back to this distance ahead of `robot_base_frame`, in metres. It must be behind any surface edge. Placeholder: measure it. |
 | `hands_motion_duration` | `4.0` | Trajectory duration, in seconds. |
 | `hands_motion_timeout` | `10.0` | Maximum time for the arms to finish, in seconds. |
 

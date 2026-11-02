@@ -36,7 +36,7 @@ import message_filters
 from ultralytics import SAM
 from surface_detector_interfaces.msg import DetectionResults, SegmentedPointcloud
 from surface_detector_interfaces.srv import SegmentObject
-from surface_detector_interfaces.action import ReachObject
+from surface_detector_interfaces.action import LowerHands, ReachObject
 
 import utils
 
@@ -84,6 +84,7 @@ class ObjectDetector(Node):
                 ('hand_lateral_offset', 0.2),           # [m] left hand at +offset, right hand at -offset
                 ('hand_surface_clearance', 0.1),        # [m] hands height above the surface
                 ('hands_raise_min_distance', 0.5),      # [m] minimum distance from the surface contour to raise the hands
+                ('hand_retract_forward_offset', 0.15),  # [m] /lower_hands first pulls the hands back to here, in the base frame
                 ('hands_motion_duration', 4.0),         # [s] trajectory duration
                 ('hands_motion_timeout', 10.0)          # [s] max time for the arms to report the end of the motion
                 ])
@@ -123,6 +124,7 @@ class ObjectDetector(Node):
         self.hand_lateral_offset = self.get_parameter("hand_lateral_offset").value
         self.hand_surface_clearance = self.get_parameter("hand_surface_clearance").value
         self.hands_raise_min_distance = self.get_parameter("hands_raise_min_distance").value
+        self.hand_retract_forward_offset = self.get_parameter("hand_retract_forward_offset").value
         self.hands_motion_duration = self.get_parameter("hands_motion_duration").value
         self.hands_motion_timeout = self.get_parameter("hands_motion_timeout").value
 
@@ -207,6 +209,12 @@ class ObjectDetector(Node):
                                      {"left": self.get_parameter("left_arm_rpc_port").value,
                                       "right": self.get_parameter("right_arm_rpc_port").value},
                                      self.get_parameter("arm_rpc_timeout").value)
+            self.lower_hands_action_server = ActionServer(self, action_type=LowerHands,
+                                                          action_name="/lower_hands",
+                                                          execute_callback=self.lower_hands_callback,
+                                                          goal_callback=self.lower_hands_goal_callback,
+                                                          cancel_callback=lambda _: CancelResponse.ACCEPT,
+                                                          callback_group=self.cb_grp)
             self.surface_sub = self.create_subscription(DetectionResults,
                                                         self.get_parameter("surface_results_topic").value,
                                                         self.surface_results_callback, 10,
@@ -420,6 +428,98 @@ class ObjectDetector(Node):
         if cancel_navigation and nav_goal_handle is not None:
             self.get_logger().info("Cancelling the navigation goal")
             nav_goal_handle.cancel_goal_async()
+
+    def lower_hands_goal_callback(self, _goal_request):
+        """
+        Accepts the request only if no other one is running, since they would share the arms
+        """
+        with self._lock:
+            if self._busy:
+                self.get_logger().warn("Rejecting request to lower the hands: another request is running")
+                return GoalResponse.REJECT
+            self._busy = True
+        return GoalResponse.ACCEPT
+
+    def lower_hands_callback(self, goal_handle : ServerGoalHandle):
+        self.get_logger().info("Received request to lower the hands")
+        outcome, error_msg = "abort", ""
+        try:
+            outcome, error_msg = self.execute_lower_hands(goal_handle)
+        except (RuntimeError, TransformException) as error:
+            error_msg = f"Could not lower the hands: {error}"
+        finally:
+            if outcome != "succeed":
+                self.stop_arms()
+            with self._lock:
+                self._busy = False
+
+        result = LowerHands.Result()
+        result.lowered = (outcome == "succeed")
+        result.error_msg = error_msg
+        if outcome == "succeed":
+            goal_handle.succeed()
+        elif outcome == "cancel":
+            goal_handle.canceled()
+        else:
+            self.get_logger().warn(f"Request aborted: {error_msg}")
+            goal_handle.abort()
+        return result
+
+    def execute_lower_hands(self, goal_handle : ServerGoalHandle):
+        """
+        Lowers the hands in two stages, because go_home is a straight line and the arms have no collision
+        avoidance: with the hands over a surface, it could cross the surface edge. So they first come back at the
+        same height, behind any surface edge. Returns the outcome ("succeed", "cancel" or "abort") and the error
+        """
+        missing_arms = self.arms.connect()
+        if missing_arms:
+            return "abort", f"Arm controllers not available: {', '.join(missing_arms)}"
+        targets = self.compute_retract_targets()
+        if targets:
+            outcome, error_msg = self.run_hands_stage(goal_handle, "retract",
+                lambda arm: self.arms.go_to_position(arm, targets[arm], self.hands_motion_duration), targets)
+            if outcome != "succeed":
+                return outcome, error_msg
+        return self.run_hands_stage(goal_handle, "go home", self.arms.go_home, self.arms.ports)
+
+    def compute_retract_targets(self):
+        """
+        Positions behind any surface edge at the current height, in the arm controllers frame, of the hands that
+        are ahead of them. It starts from the measured positions, as the hands can be anywhere after a stopped motion
+        """
+        to_base = self.tf_buffer.lookup_transform(self.robot_base_frame, self.arm_reference_frame, Time(),
+                                                  timeout=Duration(seconds=1.0))
+        to_arm = self.tf_buffer.lookup_transform(self.arm_reference_frame, self.robot_base_frame, Time(),
+                                                 timeout=Duration(seconds=1.0))
+        targets = {}
+        for arm in self.arms.ports:
+            hand = PointStamped()
+            hand.point.x, hand.point.y, hand.point.z = self.arms.get_position(arm)
+            hand = do_transform_point(hand, to_base)
+            if hand.point.x > self.hand_retract_forward_offset:
+                hand.point.x = self.hand_retract_forward_offset
+                target = do_transform_point(hand, to_arm).point
+                targets[arm] = [target.x, target.y, target.z]
+        return targets
+
+    def run_hands_stage(self, goal_handle, name, command, arms):
+        """
+        Commands the arms and waits for the end of the motion. Returns the outcome and the error message
+        """
+        for arm in arms:
+            if not command(arm):
+                return "abort", f"The {arm} arm controller refused to {name}"
+        start = time.monotonic()
+        while True:
+            time.sleep(0.2)
+            if goal_handle.is_cancel_requested:
+                return "cancel", "Request cancelled"
+            elapsed = time.monotonic() - start
+            # The elapsed time guards from a status read before the controllers started the motion
+            if elapsed >= self.hands_motion_duration and all(self.arms.is_motion_done(arm) for arm in arms):
+                return "succeed", ""
+            if elapsed > self.hands_motion_timeout:
+                return "abort", f"Timeout during the {name} stage of lowering the hands"
 
     def stop_arms(self):
         for arm in self.arms.ports:

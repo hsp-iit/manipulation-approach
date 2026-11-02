@@ -62,6 +62,9 @@ The stage ran against fake controllers and a generated Thrift server, never on r
   is, so `hands_raise_min_distance` can pass when the real edge is closer.
 - **Objects on the table are not checked.** Only the surface height is known, so anything taller than
   `hand_surface_clearance` in the path of the hands can be hit.
+- **Lowering at the table is not proven safe.** `/lower_hands` retracts to `hand_retract_forward_offset`, a
+  placeholder that must be behind the surface edge. The second stage is still a straight line: if the home pose is
+  ahead of the edge and below the surface, it can cross the edge. Check the home pose, or back away before lowering.
 
 ### L5. `reached` does not verify the object
 

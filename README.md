@@ -77,7 +77,7 @@ python3 object_detection/test/test_reach.py
 ```
 It runs on an isolated ROS domain (`ROS_DOMAIN_ID=87` by default, override with `REACH_TEST_DOMAIN_ID`), so it does not interfere with a running pipeline.
 
-Integration test of the hands raise stage (same stubs, fake arm controllers on a private YARP name server):
+Integration test of the hands raise stage and `/lower_hands` (same stubs, fake arm controllers on a private YARP name server):
 ```
 python3 object_detection/test/test_hands.py
 ```
@@ -134,9 +134,16 @@ Declared in `object_detection/detector.py` (set them with `--ros-args -p name:=v
 | `raise_hands_before_approach` | `true` | Raises the hands above the surface, through the YARP arm controllers, before any goal reaches Nav2. If they are not available the request aborts. |
 | `hand_forward_offset`, `hand_lateral_offset` | `0.4`, `0.2` | Hands position (m) from the base frame. Must match the `approach_planner` values. |
 | `hand_surface_clearance` | `0.1` | Hands height (m) above the surface. |
+| `hand_retract_forward_offset` | `0.15` | `/lower_hands` pulls the hands back to here (m) before going home. Must be behind any surface edge. |
 | `hands_raise_min_distance` | `0.5` | Minimum distance (m) from the surface to raise the hands: closer than this the request aborts. |
 
-Only one `/reach_object` request runs at a time. Cancelling the request (or its failure) also cancels the navigation goal.
+The hands stay raised after a request. To bring them down, call `/lower_hands`, also on `object_detector`, which pulls them back and then sends them home:
+
+```bash
+ros2 action send_goal /lower_hands surface_detector_interfaces/action/LowerHands "{}"
+```
+
+Only one `/reach_object` or `/lower_hands` request runs at a time. Cancelling the request (or its failure) also cancels the navigation goal.
 
 ### `approach_planner` parameters
 Configured in `approach_path_planning/param/approach_path_planning.yaml`.
