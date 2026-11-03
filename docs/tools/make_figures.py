@@ -15,7 +15,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
-from matplotlib.patches import Circle, FancyArrowPatch, Polygon, Rectangle
+from matplotlib.patches import Circle, FancyArrowPatch, FancyBboxPatch, Polygon, Rectangle
 import numpy as np
 from scipy.spatial import Delaunay
 
@@ -122,6 +122,95 @@ digraph G {
   local -> bfs -> reach; reach -> hands [label=" yes"]; hands -> best [label=" yes"]; hands -> drop [label=" no"];
   bounds -> drop [label=" no"]; fbok -> drop [label=" no"]; clear -> drop [label=" no"]; dist -> drop [label=" no"]; reach -> drop [label=" no"];
 }''')
+
+
+def autonomy_pipeline():
+    """Hand placed on a grid, so that every arrow is a straight line through empty space"""
+    EXISTS, APPROACH, DESIGN, BUILD, SAFETY = '#DCF1E8', '#DCE8FA', '#FBEBD0', '#FFFFFF', '#F8DEDB'
+    fig, ax = plt.subplots(figsize=(15, 12))
+
+    def band(y0, y1, x1, title):
+        ax.add_patch(FancyBboxPatch((2.0, y0), x1 - 2.0, y1 - y0, boxstyle='round,pad=0,rounding_size=0.12',
+                                    fc='#F7F8FA', ec='#D5DBE1', lw=1, zorder=0))
+        ax.text(0.05, (y0 + y1) / 2, title, va='center', fontsize=11, color='#414D59', fontweight='bold')
+
+    def box(cx, cy, w, h, text, fc, ec='#AEB8C2', ls='-', lw=1.1):
+        ax.add_patch(FancyBboxPatch((cx - w / 2, cy - h / 2), w, h, boxstyle='round,pad=0,rounding_size=0.1',
+                                    fc=fc, ec=ec, ls=ls, lw=lw, zorder=2))
+        ax.text(cx, cy, text, ha='center', va='center', fontsize=11, color=INK, zorder=3, linespacing=1.35)
+
+    def arrow(x0, y0, x1, y1, color='#5C6975', ls='-', lw=1.5, style='-|>'):
+        ax.add_patch(FancyArrowPatch((x0, y0), (x1, y1), arrowstyle=style, mutation_scale=14, color=color,
+                                     ls=ls, lw=lw, shrinkA=0, shrinkB=0, zorder=1))
+
+    def label(x, y, text, ha='left', color='#414D59'):
+        ax.text(x, y, text, ha=ha, va='center', fontsize=10, color=color)
+
+    band(9.5, 10.9, 16.6, 'Layer 1\nconversation')
+    band(7.1, 8.4, 12.6, 'Layer 2\ndecisions')
+    band(4.2, 6.0, 16.6, 'Layer 3\nskills')
+    band(1.5, 3.1, 16.6, 'Layer 4\nrobot services')
+
+    box(9.6, 11.95, 13.2, 0.7, 'User: voice or text', '#FFFFFF')
+    box(6.8, 10.2, 5.2, 0.95, 'Chat agent (LLM)\ntalks to the user, passes on intentions', DESIGN)
+    box(14.2, 10.2, 3.6, 0.95, 'Stop-all\nfixed code, no LLM', SAFETY, ec=RED)
+    box(6.8, 7.75, 5.2, 0.9, 'Orchestrator agent (LLM)\ndecides how to solve the request', DESIGN)
+    box(3.7, 5.2, 3.2, 1.1, 'Navigator agent\nvisual-language-navigation\nfinds objects, drives close', EXISTS)
+    box(7.3, 5.2, 3.4, 1.1, 'Approach tool\nmanipulation-approach\nraises hands, closes the gap', APPROACH, ec=BLUE, lw=2.2)
+    box(11.0, 5.2, 3.4, 1.1, 'Manipulation pipeline\nvision + cartesian control\ngrasp pose, grasp, IK check', BUILD, ls='--')
+    box(14.8, 5.2, 2.6, 1.1, 'Head tool\nlook_at(point)', BUILD, ls='--')
+    box(3.0, 2.3, 1.8, 1.0, 'SLAM +\nsemantic map\nROS 2', EXISTS)
+    box(5.5, 2.3, 2.4, 1.0, 'Nav2\ncostmap, goals\nROS 2', EXISTS)
+    box(9.0, 2.3, 2.6, 1.0, 'Arm controllers\nleft and right\nYARP', EXISTS)
+    box(12.0, 2.3, 2.0, 1.0, 'Finger\ncontroller\nYARP', EXISTS)
+    box(14.8, 2.3, 2.0, 1.0, 'Gaze\ncontroller\nYARP', EXISTS)
+    box(9.6, 0.65, 13.2, 0.7, 'Robot: camera, base, arms, hands, head', '#FFFFFF')
+
+    arrow(6.8, 11.6, 6.8, 10.68, style='<|-|>')
+    arrow(14.2, 11.6, 14.2, 10.68, color=RED, lw=2)
+    label(14.35, 11.14, 'stop word', color=RED)
+
+    arrow(6.1, 9.72, 6.1, 8.2)
+    label(5.95, 8.95, 'intentions, only if action is needed', ha='right')
+    arrow(7.5, 8.2, 7.5, 9.72, ls='--')
+    label(7.65, 8.95, 'progress, results')
+
+    # One bus from the orchestrator to the skills
+    arrow(6.8, 7.3, 6.8, 6.65, style='-')
+    arrow(3.7, 6.65, 14.8, 6.65, style='-')
+    for x in (3.7, 7.3, 11.0, 14.8):
+        arrow(x, 6.65, x, 5.75)
+    label(7.45, 6.28, '/reach_object + target hint')
+    label(11.15, 6.28, 'each skill enforces its own safety')
+
+    arrow(15.6, 9.72, 15.6, 6.0, color=RED, ls='--', lw=2)
+    label(15.45, 8.0, 'cancels every skill', ha='right', color=RED)
+
+    arrow(3.0, 4.65, 3.0, 2.8)
+    arrow(4.7, 4.65, 4.7, 2.8)
+    arrow(6.3, 4.65, 6.3, 2.8)
+    arrow(8.2, 4.65, 8.2, 2.8)
+    arrow(10.2, 4.65, 10.2, 2.8)
+    arrow(12.0, 4.65, 12.0, 2.8)
+    arrow(14.8, 4.65, 14.8, 2.8)
+    label(5.5, 3.65, 'Nav2 goals', ha='center')
+    label(9.2, 3.65, 'hand commands', ha='center')
+
+    arrow(3.0, 1.0, 3.0, 1.8)
+    label(3.15, 1.25, 'sensors')
+    for x in (5.5, 9.0, 12.0, 14.8):
+        arrow(x, 1.8, x, 1.0)
+
+    # Legend, on its own row
+    items = (('exists', EXISTS, '#AEB8C2', '-', 1.1), ('manipulation-approach', APPROACH, BLUE, '-', 2.2),
+             ('to design', DESIGN, '#AEB8C2', '-', 1.1), ('to build', BUILD, '#AEB8C2', '--', 1.1),
+             ('to build, safety', SAFETY, RED, '-', 1.1))
+    for i, (text, fc, ec, ls, lw) in enumerate(items):
+        box(3.9 + 2.85 * i, -0.2, 2.6, 0.45, text, fc, ec=ec, ls=ls, lw=lw)
+
+    ax.set_xlim(0, 16.8); ax.set_ylim(-0.6, 12.5); ax.axis('off')
+    fig.suptitle('Autonomy pipeline: planned architecture', y=0.93)
+    save(fig, '11_autonomy_pipeline.png')
 
 
 # ------------------------------------------------------------------ sequence diagram
@@ -381,6 +470,7 @@ def worked_examples():
 
 
 system_overview()
+autonomy_pipeline()
 request_sequence()
 goal_forwarding()
 surface_pipeline()
