@@ -80,8 +80,8 @@ class ObjectDetector(Node):
                 ('right_arm_rpc_port', '/cartesian-control/right_arm/rpc:i'),
                 ('arm_reference_frame', 'root_link'),   # root frame of the arm controllers
                 ('arm_rpc_timeout', 1.0),               # [s]
-                ('hand_forward_offset', 0.4),           # [m] hands position in the surface results frame, must match the approach_planner
-                ('hand_lateral_offset', 0.2),           # [m] left hand at +offset, right hand at -offset
+                ('hand_forward_offset', 0.3),           # [m] hands position in the surface results frame, must match the approach_planner
+                ('hand_lateral_offset', 0.3),           # [m] left hand at +offset, right hand at -offset
                 ('hand_surface_clearance', 0.1),        # [m] hands height above the surface
                 ('hands_raise_min_distance', 0.5),      # [m] minimum distance from the surface contour to raise the hands
                 ('hand_retract_forward_offset', 0.15),  # [m] /lower_hands first pulls the hands back to here, in the base frame

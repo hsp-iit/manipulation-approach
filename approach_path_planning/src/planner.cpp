@@ -26,9 +26,9 @@ rclcpp_lifecycle::LifecycleNode("approach_planner_node", options)
     this->declare_parameter<int>("max_costmap_val", 253);
     this->declare_parameter<double>("dist_threshold", 0.6);
     this->declare_parameter<double>("goal_robot_distance_weight", 0.25);
-    this->declare_parameter<bool>("enable_hands_over_surface_check", true);
-    this->declare_parameter<double>("hand_forward_offset", 0.4);
-    this->declare_parameter<double>("hand_lateral_offset", 0.2);
+    this->declare_parameter<bool>("enable_hands_over_surface_check", false);
+    this->declare_parameter<double>("hand_forward_offset", 0.3);
+    this->declare_parameter<double>("hand_lateral_offset", 0.3);
     this->declare_parameter<double>("hand_surface_margin", 0.05);
     this->declare_parameter<bool>("enable_window_tangent_orientation", true);
     this->declare_parameter<int>("orientation_window_size", 2);
@@ -51,9 +51,9 @@ rclcpp_lifecycle::LifecycleNode("approach_planner_node", options)
     max_costmap_val_ = 253;
     dist_threshold_ = 0.6;
     goal_robot_distance_weight_ = 0.25;
-    enable_hands_over_surface_check_ = true;
-    hand_forward_offset_ = 0.4;
-    hand_lateral_offset_ = 0.2;
+    enable_hands_over_surface_check_ = false;
+    hand_forward_offset_ = 0.3;
+    hand_lateral_offset_ = 0.3;
     hand_surface_margin_ = 0.05;
     enable_window_tangent_orientation_ = true;
     orientation_window_size_ = 2;

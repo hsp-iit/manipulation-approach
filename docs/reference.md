@@ -135,8 +135,8 @@ Set on the command line, with `--ros-args -p name:=value`. Read once at startup.
 | `right_arm_rpc_port` | `/cartesian-control/right_arm/rpc:i` | Right arm controller. |
 | `arm_reference_frame` | `root_link` | Root frame of the arm controllers (`mobile_base_body_link` on R1). |
 | `arm_rpc_timeout` | `1.0` | Seconds to wait for an RPC reply. |
-| `hand_forward_offset` | `0.4` | Hands distance ahead of the base frame, in metres. Must match `approach_planner`. |
-| `hand_lateral_offset` | `0.2` | Left hand at +offset, right hand at −offset, in metres. Must match `approach_planner`. |
+| `hand_forward_offset` | `0.3` | Hands distance ahead of the base frame, in metres. Must match `approach_planner`. |
+| `hand_lateral_offset` | `0.3` | Left hand at +offset, right hand at −offset, in metres. Must match `approach_planner`. |
 | `hand_surface_clearance` | `0.1` | Hands height above the surface, in metres. |
 | `hands_raise_min_distance` | `0.5` | Minimum distance from the contour to raise the hands, in metres. |
 | `hand_retract_forward_offset` | `0.15` | `/lower_hands` first pulls the hands back to this distance ahead of `robot_base_frame`, in metres. It must be behind any surface edge. Placeholder: measure it. |
@@ -185,9 +185,9 @@ compiled defaults match.
 | `max_costmap_val` | `253` | Cells with cost at or above this are blocked. |
 | `dist_threshold` | `0.6` | Maximum distance from goal to object, in metres. |
 | `goal_robot_distance_weight` | `0.25` | `λ` in the goal score `d_object + λ · d_robot`. Negative values are clamped to 0. |
-| `enable_hands_over_surface_check` | `true` | Reject stances with a hand off the surface. |
-| `hand_forward_offset` | `0.4` | Hands distance ahead of the base frame at the goal, in metres. Must match `object_detector`. |
-| `hand_lateral_offset` | `0.2` | Hands distance from the centre line, in metres. Must match `object_detector`. |
+| `enable_hands_over_surface_check` | `false` | Reject stances with a hand off the surface. Off: the arms are fixed to the base, so they do not limit where it can stand. |
+| `hand_forward_offset` | `0.3` | Hands distance ahead of the base frame at the goal, in metres. Must match `object_detector`. |
+| `hand_lateral_offset` | `0.3` | Hands distance from the centre line, in metres. Must match `object_detector`. |
 | `hand_surface_margin` | `0.05` | Minimum distance of each hand from the contour, in metres. |
 | `enable_window_tangent_orientation` | `true` | Heading blend and gate. If false, face along the segment normal. |
 | `orientation_window_size` | `2` | Tangent half-window in vertices, minimum 1. |

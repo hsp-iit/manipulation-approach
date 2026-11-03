@@ -85,8 +85,9 @@ values are clamped to 0.
 ### Hands
 
 Measure `hand_forward_offset` and `hand_lateral_offset` from the real pre-grasp pose, and set them on both
-`object_detector` and `approach_planner`. `hand_forward_offset` must exceed the stance offset
-(`robot_radius + goal_edge_margin`) by at least `hand_surface_margin`, or no straight approach can pass.
+`object_detector` and `approach_planner`. With `enable_hands_over_surface_check` (off by default),
+`hand_forward_offset` must exceed the stance offset (`robot_radius + goal_edge_margin`) by at least
+`hand_surface_margin`, or no straight approach can pass.
 Keep `hands_raise_min_distance` above `hand_forward_offset`, and set `hand_surface_clearance` above the
 tallest object in the path of the hands.
 

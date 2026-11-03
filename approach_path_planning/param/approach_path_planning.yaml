@@ -12,11 +12,12 @@ approach_planner:
     # The goal minimizes: distance from the object + goal_robot_distance_weight * distance from the robot
     goal_robot_distance_weight: 0.25
 
-    # Both hands must be over the surface at the goal, at least hand_surface_margin inside its contour.
+    # Optional: both hands must be over the surface at the goal, at least hand_surface_margin inside its contour.
+    # Off: the arms are fixed to the base, so they do not limit where the base can stand.
     # Offsets from the base frame, they must match the object_detector parameters with the same names.
-    enable_hands_over_surface_check: true
-    hand_forward_offset: 0.4
-    hand_lateral_offset: 0.2
+    enable_hands_over_surface_check: false
+    hand_forward_offset: 0.3
+    hand_lateral_offset: 0.3
     hand_surface_margin: 0.05
 
     # Orientation shaping (toggle + tuning)

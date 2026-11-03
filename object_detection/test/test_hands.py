@@ -149,8 +149,8 @@ def run_tests(h, nav, surface_pub, left, right):
     publish_surface(h, surface_pub, 1.0)
     ok &= check('1 both arms commanded', wait(lambda: left.commands and right.commands))
     z = SURFACE_Z + 0.1 - ROOT_Z
-    ok &= check('1 left target in the arm frame', max(abs(a - b) for a, b in zip(left.commands[0], [0.4, 0.2, z])) < 1e-6, left.commands)
-    ok &= check('1 right target in the arm frame', max(abs(a - b) for a, b in zip(right.commands[0], [0.4, -0.2, z])) < 1e-6, right.commands)
+    ok &= check('1 left target in the arm frame', max(abs(a - b) for a, b in zip(left.commands[0], [0.3, 0.3, z])) < 1e-6, left.commands)
+    ok &= check('1 right target in the arm frame', max(abs(a - b) for a, b in zip(right.commands[0], [0.3, -0.3, z])) < 1e-6, right.commands)
     time.sleep(0.3)
     h.publish_goal(1.0, 0.0)
     time.sleep(0.2)
